@@ -15,7 +15,8 @@ if (isset($_GET["api"]) && $_GET["api"] === "1") {
 <body>
   <div id="app"></div>
 
-  <script src="./js/api.js"></script>
-  <script src="./js/app.js"></script>
+<script src="./js/api.js?v=3"></script>
+<script src="./js/app.js?v=3"></script>
+
 </body>
 </html>

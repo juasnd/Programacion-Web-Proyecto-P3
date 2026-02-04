@@ -57,8 +57,24 @@ function can($mod, $acc) {
     return in_array($mod . "." . $acc, $perms, true);
 }
 
+function can_any($mod) {
+    $perms = $_SESSION["perms"] ?? [];
+    if (in_array("*", $perms, true)) return true;
+    foreach ($perms as $p) {
+        $p = (string)$p;
+        if (str_starts_with($p, $mod . ".")) return true;
+    }
+    return false;
+}
+
 function require_perm($mod, $acc) {
     if (!can($mod, $acc)) {
+        json_error(403, "acceso denegado");
+    }
+}
+
+function require_perm_any($mod) {
+    if (!can_any($mod)) {
         json_error(403, "acceso denegado");
     }
 }
@@ -79,14 +95,12 @@ function require_active_user() {
     mysqli_stmt_close($stmt);
 
     if (!$row || (int)$row["activo"] !== 1) {
-        // cerrar sesión
         $_SESSION = [];
         if (ini_get("session.use_cookies")) {
             $p = session_get_cookie_params();
             setcookie(session_name(), "", time() - 42000, $p["path"], $p["domain"], $p["secure"], $p["httponly"]);
         }
         session_destroy();
-
         json_error(401, "usuario inactivo");
     }
 }
