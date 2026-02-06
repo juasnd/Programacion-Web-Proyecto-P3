@@ -157,8 +157,8 @@ function loginView(msg = "") {
   setView(`
     <div class="login-wrapper">
       <div class="login-box fade-in">
-        <div class="login-logo">sistema web</div>
-        <div class="login-subtitle">gestión de usuarios y roles</div>
+        <div class="login-logo">Sistema Web</div>
+        <div class="login-subtitle">Gestión de usuarios y roles</div>
 
         ${msg ? `<div id="msg">${msg}</div>` : `<div id="msg"></div>`}
 

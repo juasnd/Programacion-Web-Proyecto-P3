@@ -388,7 +388,26 @@ if ($action === "usuarios_delete") {
   $myId = (int)($_SESSION["usuario_id"] ?? 0);
   if ($id === $myId) fail("no puedes desactivarte");
 
+  $st = mysqli_prepare($enlace, "
+    SELECT u.id, COALESCE(r.nombre,'') AS rol_nombre
+    FROM usuarios u
+    LEFT JOIN roles r ON r.id=u.rol_id
+    WHERE u.id=? LIMIT 1
+  ");
+  if (!$st) fail("error interno", 500);
+  mysqli_stmt_bind_param($st, "i", $id);
+  mysqli_stmt_execute($st);
+  $res = mysqli_stmt_get_result($st);
+  $target = $res ? mysqli_fetch_assoc($res) : null;
+  mysqli_stmt_close($st);
+
+  if (!$target) fail("usuario no existe", 404);
+
+  $rolTarget = strtolower(trim((string)($target["rol_nombre"] ?? "")));
+  if ($rolTarget === "admin") fail("no se puede desactivar un usuario con rol admin", 403);
+
   $st2 = mysqli_prepare($enlace, "UPDATE usuarios SET activo=0 WHERE id=?");
+  if (!$st2) fail("error interno", 500);
   mysqli_stmt_bind_param($st2, "i", $id);
   mysqli_stmt_execute($st2);
   mysqli_stmt_close($st2);
@@ -396,6 +415,7 @@ if ($action === "usuarios_delete") {
   audit("usuarios_delete", "usuarios", $id, "desactivó usuario {$id}");
   ok();
 }
+
 
 /* ===================== ROLES ===================== */
 
