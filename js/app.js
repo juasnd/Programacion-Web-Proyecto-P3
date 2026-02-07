@@ -15,7 +15,7 @@ function ensureApp() {
 
 function setView(html) {
   ensureApp().innerHTML = html;
-}
+}shell
 
 function escapeHtml(s) {
   return String(s ?? "")
@@ -90,26 +90,72 @@ function fullName(me) {
   return n || (me?.usuario || "");
 }
 
+/* ====== pagination ====== */
+function paginate(arr, page, perPage) {
+  const total = arr.length;
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+  const p = Math.min(Math.max(1, page), totalPages);
+  const start = (p - 1) * perPage;
+  return { page: p, totalPages, slice: arr.slice(start, start + perPage) };
+}
+
+function renderPager(containerSel, page, totalPages, onGo) {
+  const el = $(containerSel);
+  if (!el) return;
+
+  if (totalPages <= 1) {
+    el.innerHTML = "";
+    return;
+  }
+
+  const btn = (label, p, disabled, active = false) => `
+    <button class="pager-btn ${active ? "active" : ""}" ${disabled ? "disabled" : ""} data-p="${p}">
+      ${label}
+    </button>
+  `;
+
+  const maxNumbers = 5;
+  let start = Math.max(1, page - 2);
+  let end = Math.min(totalPages, start + (maxNumbers - 1));
+  start = Math.max(1, end - (maxNumbers - 1));
+
+  const nums = [];
+  for (let i = start; i <= end; i++) nums.push(i);
+
+  el.innerHTML = `
+    <div class="pager">
+      ${btn("anterior", page - 1, page <= 1)}
+      <div class="pager-numbers">
+        ${nums.map(n => btn(String(n), n, false, n === page)).join("")}
+      </div>
+      ${btn("siguiente", page + 1, page >= totalPages)}
+    </div>
+  `;
+
+  el.querySelectorAll("[data-p]").forEach(b => {
+    b.onclick = () => {
+      const p = Number(b.dataset.p);
+      if (!p || p < 1 || p > totalPages) return;
+      onGo(p);
+    };
+  });
+}
+
+/* ===== shell (topbar con nav, sin sidebar) ===== */
 function shell(me, active, contentHtml) {
-  const showUsuarios = hasAnyPerm(me, "usuarios");
-  const showRoles = hasAnyPerm(me, "roles");
-  const showPermisos = hasAnyPerm(me, "permisos");
+  const showUsuarios = hasAnyPerm(me, "Usuarios");
+  const showRoles = hasAnyPerm(me, "Roles");
+  const showPermisos = hasAnyPerm(me, "Permisos");
 
-  const usuariosLink = showUsuarios
-    ? `<li><a class="sidebar-link ${active === "usuarios" ? "active" : ""}" href="#usuarios"><span class="sidebar-text">usuarios</span></a></li>`
-    : "";
-
-  const rolesLink = showRoles
-    ? `<li><a class="sidebar-link ${active === "roles" ? "active" : ""}" href="#roles"><span class="sidebar-text">roles</span></a></li>`
-    : "";
-
-  const permisosLink = showPermisos
-    ? `<li><a class="sidebar-link ${active === "permisos" ? "active" : ""}" href="#permisos"><span class="sidebar-text">permisos</span></a></li>`
-    : "";
+  const navItem = (id, label, show) => show ? `
+    <a class="nav-link ${active === id ? "active" : ""}" href="#${id}">${label}</a>
+  ` : "";
 
   const avatarChar = escapeHtml(((me.nombres || me.usuario || "u")[0] || "u").toUpperCase());
   const rolName = escapeHtml(me.rol_nombre || "sin rol");
-  const nombreMostrado = escapeHtml(fullName(me));
+const nombreMostrado = escapeHtml(me.usuario || "");
+
+
 
   return `
     <div class="topbar">
@@ -121,34 +167,29 @@ function shell(me, active, contentHtml) {
         </div>
       </div>
 
-      <div class="topbar-center">
+      <nav class="topnav" aria-label="navegación">
+        <a class="nav-link ${active === "Dashboard" ? "active" : ""}" href="#dashboard">dashboard</a>
+        ${navItem("usuarios", "Usuarios", showUsuarios)}
+        ${navItem("roles", "Roles", showRoles)}
+        ${navItem("permisos", "Permisos", showPermisos)}
+      </nav>
+
+      <div class="topbar-right">
         <div class="datetime-display">
           <div class="current-date" id="currentDate">cargando...</div>
           <div class="current-time" id="currentTime">--:--:--</div>
         </div>
+        <button class="btn btn-outline" id="btnLogout" type="button">salir</button>
       </div>
-
-      <button class="logout-btn" id="btnLogout" type="button">salir</button>
     </div>
 
-    <div class="gestion-layout">
-      <aside class="sidebar">
-        <ul class="sidebar-nav">
-          <li><a class="sidebar-link ${active === "dashboard" ? "active" : ""}" href="#dashboard"><span class="sidebar-text">dashboard</span></a></li>
-          ${usuariosLink}
-          ${rolesLink}
-          ${permisosLink}
-        </ul>
-      </aside>
-
-      <main class="content-area">
-        <div class="content-header">
-          <h1 class="section-title">${escapeHtml(active)}</h1>
-          <div class="section-subtitle">gestión del sistema</div>
-        </div>
-        <div id="content">${contentHtml}</div>
-      </main>
-    </div>
+    <main class="content-area">
+      <div class="seccion-barra">
+      <div class="seccion-titulo">${escapeHtml(active)}</div>
+      <div class="seccion-acciones" id="accionesSeccion"></div>
+      </div>
+      <div id="content">${contentHtml}</div>
+    </main>
   `;
 }
 
@@ -157,8 +198,8 @@ function loginView(msg = "") {
   setView(`
     <div class="login-wrapper">
       <div class="login-box fade-in">
-        <div class="login-logo">Sistema Web</div>
-        <div class="login-subtitle">Gestión de usuarios y roles</div>
+        <div class="login-logo">sistema web</div>
+        <div class="login-subtitle">gestión de usuarios y roles</div>
 
         ${msg ? `<div id="msg">${msg}</div>` : `<div id="msg"></div>`}
 
@@ -174,13 +215,13 @@ function loginView(msg = "") {
     const password = $("#password").value;
 
     if (!usuario || !password) {
-      $("#msg").innerHTML = `<div class="message error">complete todos los campos</div>`;
+      $("#msg").innerHTML = `<div class="message info">complete todos los campos</div>`;
       return;
     }
 
     const r = await Api.login(usuario, password);
     if (!r.ok) {
-      $("#msg").innerHTML = `<div class="message error">${escapeHtml(r.error)}</div>`;
+      $("#msg").innerHTML = `<div class="message info">${escapeHtml(r.error)}</div>`;
       return;
     }
 
@@ -311,7 +352,7 @@ function showEditUserModal(me, user, roles, onSave) {
 
         <div class="modal-actions">
           <button class="btn btn-primary" id="saveEdit" type="button">guardar</button>
-          <button class="btn btn-secondary" id="cancelEdit" type="button">cancelar</button>
+          <button class="btn btn-outline" id="cancelEdit" type="button">cancelar</button>
         </div>
       </div>
     </div>
@@ -475,6 +516,7 @@ async function viewUsuarios(me) {
           </tbody>
         </table>
       </div>
+      <div id="uPager" class="pager-wrap"></div>
       ` : `<div class="message info">no tienes permiso para ver registros de usuarios</div>`}
     </div>
   `));
@@ -482,8 +524,8 @@ async function viewUsuarios(me) {
   $("#btnLogout").onclick = logoutTotal;
   startClock();
 
-  function msg(okv, text, type = okv ? "success" : "error") {
-    $("#uMsg").innerHTML = `<div class="message ${type}">${escapeHtml(text)}</div>`;
+  function msg(okv, text) {
+    $("#uMsg").innerHTML = `<div class="message info">${escapeHtml(text)}</div>`;
     setTimeout(() => ($("#uMsg").innerHTML = ""), 4000);
   }
 
@@ -538,21 +580,15 @@ async function viewUsuarios(me) {
     };
   }
 
-  async function cargarUsuarios() {
-    if (!canList) return;
+  let usersData = [];
+  let uPage = 1;
+  const perPage = 4;
 
-    const r = await Api.usuarios_list();
-    if (!r.ok) {
-      $("#uTableBody").innerHTML = `<tr><td colspan="9" class="td-center td-error">${escapeHtml(r.error)}</td></tr>`;
-      return;
-    }
+  function renderUsersPage() {
+    const out = paginate(usersData, uPage, perPage);
+    uPage = out.page;
 
-    if (!r.data || r.data.length === 0) {
-      $("#uTableBody").innerHTML = `<tr><td colspan="9" class="td-center">sin usuarios</td></tr>`;
-      return;
-    }
-
-    $("#uTableBody").innerHTML = r.data.map(u => {
+    $("#uTableBody").innerHTML = out.slice.map(u => {
       const edad = calcEdad(u.fecha_nacimiento);
       const disEdit = !canEdit;
       const disDel = !canDelete;
@@ -573,8 +609,8 @@ async function viewUsuarios(me) {
           </td>
           <td>
             <div class="actions-container">
-              <button class="btn btn-secondary btn-sm" data-edit="${u.id}" ${disEdit ? "disabled" : ""} type="button">editar</button>
-              <button class="btn btn-danger btn-sm" data-del="${u.id}" ${disDel ? "disabled" : ""} type="button">eliminar</button>
+              <button class="btn btn-outline btn-sm" data-edit="${u.id}" ${disEdit ? "disabled" : ""} type="button">editar</button>
+              <button class="btn btn-outline btn-sm" data-del="${u.id}" ${disDel ? "disabled" : ""} type="button">eliminar</button>
             </div>
           </td>
         </tr>
@@ -598,17 +634,43 @@ async function viewUsuarios(me) {
       b.onclick = async () => {
         if (!canEdit) return msg(false, "sin permiso para editar");
         const id = Number(b.dataset.edit);
-        const user = r.data.find(x => Number(x.id) === id);
+        const user = usersData.find(x => Number(x.id) === id);
         if (!user) return;
         showEditUserModal(me, user, roles, cargarUsuarios);
       };
     });
+
+    renderPager("#uPager", uPage, out.totalPages, (p) => {
+      uPage = p;
+      renderUsersPage();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  }
+
+  async function cargarUsuarios() {
+    if (!canList) return;
+
+    const r = await Api.usuarios_list();
+    if (!r.ok) {
+      $("#uTableBody").innerHTML = `<tr><td colspan="9" class="td-center td-error">${escapeHtml(r.error)}</td></tr>`;
+      return;
+    }
+
+    usersData = Array.isArray(r.data) ? r.data : [];
+    if (usersData.length === 0) {
+      $("#uTableBody").innerHTML = `<tr><td colspan="9" class="td-center">sin usuarios</td></tr>`;
+      $("#uPager").innerHTML = "";
+      return;
+    }
+
+    uPage = 1;
+    renderUsersPage();
   }
 
   cargarUsuarios();
 }
 
-/* ===================== ROLES (AHORA SÍ: crear para cualquiera con permiso) ===================== */
+/* ===================== ROLES ===================== */
 
 async function viewRoles(me) {
   if (!hasAnyPerm(me, "roles")) {
@@ -618,7 +680,7 @@ async function viewRoles(me) {
 
   const canList = hasPerm(me, "roles", "ver");
   const canCreate = hasPerm(me, "roles", "crear");
-  const canEdit = hasPerm(me, "roles", "editar") && me.is_admin; // solo admin edita descripción
+  const canEdit = hasPerm(me, "roles", "editar") && me.is_admin;
 
   setView(shell(me, "roles", `
     <div class="dashboard-container fade-in">
@@ -658,6 +720,7 @@ async function viewRoles(me) {
           </tbody>
         </table>
       </div>
+      <div id="rPager" class="pager-wrap"></div>
       ` : `<div class="message info">no tienes permiso para ver registros de roles</div>`}
 
       ${(!me.is_admin && canList) ? `<div class="message info">nota: editar descripción de roles es solo para admin.</div>` : ``}
@@ -667,26 +730,20 @@ async function viewRoles(me) {
   $("#btnLogout").onclick = logoutTotal;
   startClock();
 
-  function msg(okv, text, type = okv ? "success" : "error") {
-    $("#rMsg").innerHTML = `<div class="message ${type}">${escapeHtml(text)}</div>`;
+  function msg(okv, text) {
+    $("#rMsg").innerHTML = `<div class="message info">${escapeHtml(text)}</div>`;
     setTimeout(() => ($("#rMsg").innerHTML = ""), 4000);
   }
 
-  async function cargarRoles() {
-    if (!canList) return;
+  let rolesData = [];
+  let rPage = 1;
+  const perPage = 4;
 
-    const r = await Api.roles_list();
-    if (!r.ok) {
-      $("#rTableBody").innerHTML = `<tr><td colspan="5" class="td-center td-error">${escapeHtml(r.error)}</td></tr>`;
-      return;
-    }
+  function renderRolesPage() {
+    const out = paginate(rolesData, rPage, perPage);
+    rPage = out.page;
 
-    if (!r.data || r.data.length === 0) {
-      $("#rTableBody").innerHTML = `<tr><td colspan="5" class="td-center">sin roles</td></tr>`;
-      return;
-    }
-
-    $("#rTableBody").innerHTML = r.data.map(x => {
+    $("#rTableBody").innerHTML = out.slice.map(x => {
       const sys = Number(x.es_sistema) === 1;
       const disEdit = sys || !canEdit;
 
@@ -702,8 +759,8 @@ async function viewRoles(me) {
           </td>
           <td>
             <div class="actions-container">
-              <button class="btn btn-secondary btn-sm" data-edit="${x.id}" ${disEdit ? "disabled" : ""} type="button">editar</button>
-              <button class="btn btn-danger btn-sm" disabled type="button">eliminar</button>
+              <button class="btn btn-outline btn-sm" data-edit="${x.id}" ${disEdit ? "disabled" : ""} type="button">editar</button>
+              <button class="btn btn-outline btn-sm" disabled type="button">eliminar</button>
             </div>
           </td>
         </tr>
@@ -714,7 +771,7 @@ async function viewRoles(me) {
       if (b.disabled) return;
       b.onclick = async () => {
         const id = Number(b.dataset.edit);
-        const current = r.data.find(z => Number(z.id) === id);
+        const current = rolesData.find(z => Number(z.id) === id);
         const desc = prompt("nueva descripción:", current?.descripcion || "");
         if (desc === null) return;
 
@@ -723,6 +780,32 @@ async function viewRoles(me) {
         if (rr.ok) cargarRoles();
       };
     });
+
+    renderPager("#rPager", rPage, out.totalPages, (p) => {
+      rPage = p;
+      renderRolesPage();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  }
+
+  async function cargarRoles() {
+    if (!canList) return;
+
+    const r = await Api.roles_list();
+    if (!r.ok) {
+      $("#rTableBody").innerHTML = `<tr><td colspan="5" class="td-center td-error">${escapeHtml(r.error)}</td></tr>`;
+      return;
+    }
+
+    rolesData = Array.isArray(r.data) ? r.data : [];
+    if (rolesData.length === 0) {
+      $("#rTableBody").innerHTML = `<tr><td colspan="5" class="td-center">sin roles</td></tr>`;
+      $("#rPager").innerHTML = "";
+      return;
+    }
+
+    rPage = 1;
+    renderRolesPage();
   }
 
   if (canCreate) {
@@ -771,7 +854,7 @@ async function viewPermisos(me) {
 
   const r = await Api.permisos_get();
   if (!r.ok) {
-    setView(shell(me, "permisos", `<div class="message error">${escapeHtml(r.error)}</div>`));
+    setView(shell(me, "permisos", `<div class="message info">${escapeHtml(r.error)}</div>`));
     $("#btnLogout").onclick = logoutTotal;
     startClock();
     return;
@@ -806,8 +889,8 @@ async function viewPermisos(me) {
 
         <div class="perm-actions">
           <button class="btn btn-primary" id="btnGuardarP" type="button">guardar</button>
-          <button class="btn btn-secondary" id="btnSeleccionarTodos" type="button">seleccionar todo</button>
-          <button class="btn btn-secondary" id="btnDeseleccionarTodos" type="button">deseleccionar todo</button>
+          <button class="btn btn-outline" id="btnSeleccionarTodos" type="button">seleccionar todo</button>
+          <button class="btn btn-outline" id="btnDeseleccionarTodos" type="button">deseleccionar todo</button>
         </div>
 
         <div id="pMsg" style="margin-top: 1rem;"></div>
@@ -864,7 +947,7 @@ async function viewPermisos(me) {
 
   $("#btnGuardarP").onclick = async () => {
     if (!hasPerm(me, "permisos", "editar") || !me.is_admin) {
-      $("#pMsg").innerHTML = `<div class="message error">sin permiso para editar (solo admin)</div>`;
+      $("#pMsg").innerHTML = `<div class="message info">sin permiso para editar (solo admin)</div>`;
       return;
     }
 
@@ -876,7 +959,7 @@ async function viewPermisos(me) {
     }));
 
     const rr = await Api.permisos_set({ rol_id, perms: selected });
-    $("#pMsg").innerHTML = `<div class="message ${rr.ok ? "success" : "error"}">${escapeHtml(rr.ok ? "guardado" : rr.error)}</div>`;
+    $("#pMsg").innerHTML = `<div class="message info">${escapeHtml(rr.ok ? "guardado" : rr.error)}</div>`;
 
     if (rr.ok) {
       map[String(rol_id)] = selected;

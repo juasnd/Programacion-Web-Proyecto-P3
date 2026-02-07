@@ -10,13 +10,14 @@ if (isset($_GET["api"]) && $_GET["api"] === "1") {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>sistema web</title>
-  <link rel="stylesheet" href="./css/estilos.css" />
+<link rel="stylesheet" href="./css/estilos.css?v=<?=time()?>">
 </head>
 <body>
   <div id="app"></div>
 
-<script src="./js/api.js?v=3"></script>
-<script src="./js/app.js?v=3"></script>
+<script src="./js/api.js?v=<?=time()?>"></script>
+<script src="./js/app.js?v=<?=time()?>"></script>
+
 
 </body>
 </html>
