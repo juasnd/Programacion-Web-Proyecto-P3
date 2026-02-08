@@ -237,7 +237,7 @@ if ($action === "usuarios_list") {
     ORDER BY u.id DESC
   ");
   $data = [];
-  while ($row = mysqli_fetch_assoc($q)) $data[] = $row;
+  while ($q && ($row = mysqli_fetch_assoc($q))) $data[] = $row;
   ok(["data" => $data]);
 }
 
@@ -276,12 +276,14 @@ if ($action === "usuarios_create") {
       INSERT INTO usuarios (usuario,nombres,apellidos,cedula,fecha_nacimiento,password_hash,activo,intentos_fallidos)
       VALUES (?,?,?,?,?,?,1,0)
     ");
+    if (!$st) fail("error interno",500);
     mysqli_stmt_bind_param($st, "ssssss", $usuario, $nombres, $apellidos, $cedula, $fecha_nacimiento, $hash);
   } else {
     $st = mysqli_prepare($enlace, "
       INSERT INTO usuarios (usuario,nombres,apellidos,cedula,fecha_nacimiento,password_hash,rol_id,activo,intentos_fallidos)
       VALUES (?,?,?,?,?,?,?,1,0)
     ");
+    if (!$st) fail("error interno",500);
     mysqli_stmt_bind_param($st, "ssssssi", $usuario, $nombres, $apellidos, $cedula, $fecha_nacimiento, $hash, $rol_id);
   }
 
@@ -416,7 +418,6 @@ if ($action === "usuarios_delete") {
   ok();
 }
 
-
 /* ===================== ROLES ===================== */
 
 if ($action === "roles_list") {
@@ -424,11 +425,10 @@ if ($action === "roles_list") {
 
   $q = mysqli_query($enlace, "SELECT id, nombre, descripcion, es_sistema FROM roles ORDER BY id DESC");
   $data = [];
-  while ($r = mysqli_fetch_assoc($q)) $data[] = $r;
+  while ($q && ($r = mysqli_fetch_assoc($q))) $data[] = $r;
   ok(["data" => $data]);
 }
 
-/* crear roles: REGLA TUYA => si tiene rol_id > 0, puede crear roles aunque NO tenga roles.* */
 if ($action === "roles_create") {
   $myRol = (int)($_SESSION["rol_id"] ?? 0);
   if ($myRol <= 0) fail("debes tener un rol asignado para crear roles", 403);
@@ -440,6 +440,7 @@ if ($action === "roles_create") {
   if (!preg_match("/^[a-z0-9_]{3,50}$/", $nombre)) fail("nombre inválido (3-50, a-z 0-9 _ )");
 
   $st = mysqli_prepare($enlace, "INSERT INTO roles (nombre, descripcion, es_sistema) VALUES (?, ?, 0)");
+  if (!$st) fail("error interno",500);
   mysqli_stmt_bind_param($st, "ss", $nombre, $desc);
   $okExec = mysqli_stmt_execute($st);
   $err = mysqli_stmt_error($st);
@@ -455,7 +456,6 @@ if ($action === "roles_create") {
   ok();
 }
 
-/* editar rol: SOLO descripción, y respeta permisos (roles.editar). NO es solo admin. */
 if ($action === "roles_update") {
   require_perm("roles", "editar");
 
@@ -469,6 +469,7 @@ if ($action === "roles_update") {
   if ((int)$rr["es_sistema"] === 1) fail("no puedes editar un rol del sistema", 403);
 
   $st = mysqli_prepare($enlace, "UPDATE roles SET descripcion=? WHERE id=?");
+  if (!$st) fail("error interno",500);
   mysqli_stmt_bind_param($st, "si", $desc, $id);
   mysqli_stmt_execute($st);
   mysqli_stmt_close($st);
@@ -488,7 +489,7 @@ if ($action === "permisos_get") {
 
   $roles = [];
   $q = mysqli_query($enlace, "SELECT id, nombre, descripcion FROM roles ORDER BY id DESC");
-  while ($r = mysqli_fetch_assoc($q)) $roles[] = $r;
+  while ($q && ($r = mysqli_fetch_assoc($q))) $roles[] = $r;
 
   $map = [];
   $q2 = mysqli_query($enlace, "
@@ -496,7 +497,7 @@ if ($action === "permisos_get") {
     FROM rol_permisos rp
     JOIN permisos p ON p.id=rp.permiso_id
   ");
-  while ($x = mysqli_fetch_assoc($q2)) {
+  while ($q2 && ($x = mysqli_fetch_assoc($q2))) {
     $k = (string)$x["rol_id"];
     if (!isset($map[$k])) $map[$k] = [];
     $map[$k][] = $x["modulo"] . "." . $x["accion"];
@@ -516,12 +517,14 @@ if ($action === "permisos_set") {
   mysqli_begin_transaction($enlace);
 
   $stDel = mysqli_prepare($enlace, "DELETE FROM rol_permisos WHERE rol_id=?");
+  if (!$stDel) { mysqli_rollback($enlace); fail("error interno",500); }
   mysqli_stmt_bind_param($stDel, "i", $rol_id);
   mysqli_stmt_execute($stDel);
   mysqli_stmt_close($stDel);
 
   $stFind = mysqli_prepare($enlace, "SELECT id FROM permisos WHERE modulo=? AND accion=? LIMIT 1");
   $stIns  = mysqli_prepare($enlace, "INSERT INTO rol_permisos (rol_id, permiso_id) VALUES (?, ?)");
+  if (!$stFind || !$stIns) { mysqli_rollback($enlace); fail("error interno",500); }
 
   $count = 0;
   foreach ($perms as $p) {
@@ -551,6 +554,425 @@ if ($action === "permisos_set") {
 
   audit("permisos_set", "rol_permisos", $rol_id, "asignó {$count} permiso(s) al rol {$rol_id}");
   ok();
+}
+
+/* =========================
+   cursos
+   ========================= */
+
+if ($action === "cursos_list") {
+  require_active_user();
+  require_perm("cursos","ver");
+  global $enlace;
+
+  $sql = "SELECT c.id,c.nombre,c.paralelo,c.periodo,c.docente_id,c.dia_semana,
+                 TIME_FORMAT(c.hora_inicio,'%H:%i') hora_inicio,
+                 TIME_FORMAT(c.hora_fin,'%H:%i') hora_fin,
+                 c.aula,c.activo,
+                 CONCAT(u.nombres,' ',u.apellidos) docente_nombre
+          FROM cursos c
+          LEFT JOIN usuarios u ON u.id=c.docente_id
+          WHERE c.activo=1
+          ORDER BY c.periodo DESC, c.nombre ASC, c.paralelo ASC";
+  $r = mysqli_query($enlace, $sql);
+  $rows = [];
+  while ($r && ($row = mysqli_fetch_assoc($r))) $rows[] = $row;
+  ok(["rows"=>$rows]);
+}
+
+if ($action === "cursos_create") {
+  require_active_user();
+  require_perm("cursos","crear");
+  global $enlace;
+
+  $nombre = trim((string)($body["nombre"] ?? ""));
+  $paralelo = trim((string)($body["paralelo"] ?? "A"));
+  $periodo = trim((string)($body["periodo"] ?? ""));
+  $docente_id = array_key_exists("docente_id",$body) ? (($body["docente_id"]===""||$body["docente_id"]===null) ? null : (int)$body["docente_id"]) : null;
+  $dia = (int)($body["dia_semana"] ?? 1);
+  $hi = trim((string)($body["hora_inicio"] ?? "07:00"));
+  $hf = trim((string)($body["hora_fin"] ?? "08:00"));
+  $aula = trim((string)($body["aula"] ?? ""));
+
+  if ($nombre==="" || $periodo==="") fail("datos incompletos");
+  if ($dia < 1 || $dia > 7) fail("dia_semana inválido");
+  if (!preg_match('/^\d{2}:\d{2}$/', $hi) || !preg_match('/^\d{2}:\d{2}$/', $hf)) fail("hora inválida (HH:MM)");
+  if ($hi >= $hf) fail("hora_inicio debe ser menor que hora_fin");
+
+  $uid = (int)$_SESSION["usuario_id"];
+
+  $stmt = mysqli_prepare($enlace, "INSERT INTO cursos(nombre,paralelo,periodo,docente_id,dia_semana,hora_inicio,hora_fin,aula,creado_por,activo)
+                                   VALUES(?,?,?,?,?,STR_TO_DATE(?, '%H:%i'),STR_TO_DATE(?, '%H:%i'),?,?,1)");
+  if (!$stmt) fail("error interno",500);
+
+  mysqli_stmt_bind_param($stmt, "sssiiissii", $nombre,$paralelo,$periodo,$docente_id,$dia,$hi,$hf,$aula,$uid);
+  if (!mysqli_stmt_execute($stmt)) {
+    $e = mysqli_stmt_error($stmt);
+    mysqli_stmt_close($stmt);
+    fail($e ?: "no se pudo crear", 400);
+  }
+  $id = (int)mysqli_insert_id($enlace);
+  mysqli_stmt_close($stmt);
+
+  audit("cursos_create","cursos",$id,"creó curso $nombre $paralelo ($periodo)");
+  ok(["id"=>$id]);
+}
+
+if ($action === "cursos_update") {
+  require_active_user();
+  require_perm("cursos","editar");
+  global $enlace;
+
+  $id = (int)($body["id"] ?? 0);
+  $nombre = trim((string)($body["nombre"] ?? ""));
+  $paralelo = trim((string)($body["paralelo"] ?? "A"));
+  $periodo = trim((string)($body["periodo"] ?? ""));
+  $docente_id = array_key_exists("docente_id",$body) ? (($body["docente_id"]===""||$body["docente_id"]===null) ? null : (int)$body["docente_id"]) : null;
+  $dia = (int)($body["dia_semana"] ?? 1);
+  $hi = trim((string)($body["hora_inicio"] ?? "07:00"));
+  $hf = trim((string)($body["hora_fin"] ?? "08:00"));
+  $aula = trim((string)($body["aula"] ?? ""));
+
+  if ($id<=0) fail("id inválido");
+  if ($nombre==="" || $periodo==="") fail("datos incompletos");
+  if ($dia < 1 || $dia > 7) fail("dia_semana inválido");
+  if (!preg_match('/^\d{2}:\d{2}$/', $hi) || !preg_match('/^\d{2}:\d{2}$/', $hf)) fail("hora inválida (HH:MM)");
+  if ($hi >= $hf) fail("hora_inicio debe ser menor que hora_fin");
+
+  $stmt = mysqli_prepare($enlace, "UPDATE cursos
+      SET nombre=?, paralelo=?, periodo=?, docente_id=?, dia_semana=?,
+          hora_inicio=STR_TO_DATE(?, '%H:%i'), hora_fin=STR_TO_DATE(?, '%H:%i'),
+          aula=?
+      WHERE id=?");
+  if (!$stmt) fail("error interno",500);
+
+  mysqli_stmt_bind_param($stmt, "sssiiissi", $nombre,$paralelo,$periodo,$docente_id,$dia,$hi,$hf,$aula,$id);
+  if (!mysqli_stmt_execute($stmt)) {
+    $e = mysqli_stmt_error($stmt);
+    mysqli_stmt_close($stmt);
+    fail($e ?: "no se pudo actualizar", 400);
+  }
+  mysqli_stmt_close($stmt);
+
+  audit("cursos_update","cursos",$id,"editó curso $id");
+  ok();
+}
+
+if ($action === "cursos_delete") {
+  require_active_user();
+  require_perm("cursos","eliminar");
+  global $enlace;
+
+  $id = (int)($body["id"] ?? 0);
+  if ($id<=0) fail("id inválido");
+
+  $stmt = mysqli_prepare($enlace, "UPDATE cursos SET activo=0 WHERE id=?");
+  if (!$stmt) fail("error interno",500);
+  mysqli_stmt_bind_param($stmt, "i", $id);
+  mysqli_stmt_execute($stmt);
+  mysqli_stmt_close($stmt);
+
+  audit("cursos_delete","cursos",$id,"desactivó curso $id");
+  ok();
+}
+
+/* =========================
+   matriculas
+   choque horario por estudiante y periodo
+   ========================= */
+
+if ($action === "matriculas_create") {
+  require_active_user();
+  require_perm("matriculas","crear");
+  global $enlace;
+
+  $curso_id = (int)($body["curso_id"] ?? 0);
+  $estudiante_id = (int)($body["estudiante_id"] ?? 0);
+  if ($curso_id<=0 || $estudiante_id<=0) fail("datos inválidos");
+
+  $st = mysqli_prepare($enlace, "SELECT r.nombre rol, u.activo
+                                FROM usuarios u LEFT JOIN roles r ON r.id=u.rol_id
+                                WHERE u.id=? LIMIT 1");
+  if (!$st) fail("error interno",500);
+  mysqli_stmt_bind_param($st, "i", $estudiante_id);
+  mysqli_stmt_execute($st);
+  $res = mysqli_stmt_get_result($st);
+  $urow = $res ? mysqli_fetch_assoc($res) : null;
+  mysqli_stmt_close($st);
+
+  if (!$urow) fail("estudiante no existe");
+  if ((int)$urow["activo"]!==1) fail("estudiante inactivo");
+  if (strtolower((string)$urow["rol"]) !== "estudiante") fail("el usuario no tiene rol estudiante");
+
+  $st = mysqli_prepare($enlace, "SELECT periodo,dia_semana,
+                                 TIME_FORMAT(hora_inicio,'%H:%i') hi,
+                                 TIME_FORMAT(hora_fin,'%H:%i') hf
+                                 FROM cursos WHERE id=? AND activo=1 LIMIT 1");
+  if (!$st) fail("error interno",500);
+  mysqli_stmt_bind_param($st, "i", $curso_id);
+  mysqli_stmt_execute($st);
+  $res = mysqli_stmt_get_result($st);
+  $crow = $res ? mysqli_fetch_assoc($res) : null;
+  mysqli_stmt_close($st);
+
+  if (!$crow) fail("curso no existe o está inactivo");
+
+  $periodo = (string)$crow["periodo"];
+  $dia = (int)$crow["dia_semana"];
+  $hi = (string)$crow["hi"];
+  $hf = (string)$crow["hf"];
+
+  $sql = "SELECT m.curso_id
+          FROM matriculas m
+          JOIN cursos c ON c.id=m.curso_id
+          WHERE m.estudiante_id=? AND m.estado='ACTIVA'
+            AND c.activo=1
+            AND c.periodo=?
+            AND c.dia_semana=?
+            AND NOT (TIME(c.hora_fin) <= STR_TO_DATE(?, '%H:%i')
+                     OR TIME(c.hora_inicio) >= STR_TO_DATE(?, '%H:%i'))
+          LIMIT 1";
+  $st = mysqli_prepare($enlace, $sql);
+  if (!$st) fail("error interno",500);
+  mysqli_stmt_bind_param($st, "isiss", $estudiante_id,$periodo,$dia,$hi,$hf);
+  mysqli_stmt_execute($st);
+  $res = mysqli_stmt_get_result($st);
+  $conf = $res ? mysqli_fetch_assoc($res) : null;
+  mysqli_stmt_close($st);
+
+  if ($conf) fail("choque de horario con otro curso en el mismo periodo", 409);
+
+  $st = mysqli_prepare($enlace, "INSERT INTO matriculas(curso_id,estudiante_id,estado) VALUES(?,?,'ACTIVA')
+                                 ON DUPLICATE KEY UPDATE estado='ACTIVA'");
+  if (!$st) fail("error interno",500);
+  mysqli_stmt_bind_param($st, "ii", $curso_id,$estudiante_id);
+  if (!mysqli_stmt_execute($st)) {
+    $e = mysqli_stmt_error($st);
+    mysqli_stmt_close($st);
+    fail($e ?: "no se pudo matricular", 400);
+  }
+  mysqli_stmt_close($st);
+
+  audit("matriculas_create","matriculas",null,"matriculó estudiante $estudiante_id en curso $curso_id");
+  ok();
+}
+
+if ($action === "matriculas_anular") {
+  require_active_user();
+  require_perm("matriculas","anular");
+  global $enlace;
+
+  $curso_id = (int)($body["curso_id"] ?? 0);
+  $estudiante_id = (int)($body["estudiante_id"] ?? 0);
+  if ($curso_id<=0 || $estudiante_id<=0) fail("datos inválidos");
+
+  $st = mysqli_prepare($enlace, "UPDATE matriculas SET estado='RETIRADA' WHERE curso_id=? AND estudiante_id=?");
+  if (!$st) fail("error interno",500);
+  mysqli_stmt_bind_param($st, "ii", $curso_id,$estudiante_id);
+  mysqli_stmt_execute($st);
+  mysqli_stmt_close($st);
+
+  audit("matriculas_anular","matriculas",null,"anuló matrícula estudiante $estudiante_id curso $curso_id");
+  ok();
+}
+
+/* =========================
+   notas (docente)
+   ========================= */
+
+if ($action === "mis_cursos") {
+  require_active_user();
+  require_perm("notas","ver");
+  global $enlace;
+
+  $docente_id = (int)$_SESSION["usuario_id"];
+  $sql = "SELECT id,nombre,paralelo,periodo,dia_semana,
+                 TIME_FORMAT(hora_inicio,'%H:%i') hora_inicio,
+                 TIME_FORMAT(hora_fin,'%H:%i') hora_fin,
+                 aula
+          FROM cursos
+          WHERE activo=1 AND docente_id=?
+          ORDER BY periodo DESC, nombre ASC, paralelo ASC";
+  $st = mysqli_prepare($enlace, $sql);
+  if (!$st) fail("error interno",500);
+  mysqli_stmt_bind_param($st, "i", $docente_id);
+  mysqli_stmt_execute($st);
+  $res = mysqli_stmt_get_result($st);
+  $rows = [];
+  while ($res && ($row = mysqli_fetch_assoc($res))) $rows[] = $row;
+  mysqli_stmt_close($st);
+  ok(["rows"=>$rows]);
+}
+
+if ($action === "curso_estudiantes") {
+  require_active_user();
+  require_perm("notas","ver");
+  global $enlace;
+
+  $curso_id = (int)($_GET["curso_id"] ?? 0);
+  if ($curso_id<=0) fail("curso_id inválido");
+
+  $docente_id = (int)$_SESSION["usuario_id"];
+  $st = mysqli_prepare($enlace, "SELECT id FROM cursos WHERE id=? AND docente_id=? AND activo=1 LIMIT 1");
+  if (!$st) fail("error interno",500);
+  mysqli_stmt_bind_param($st, "ii", $curso_id,$docente_id);
+  mysqli_stmt_execute($st);
+  $res = mysqli_stmt_get_result($st);
+  $okc = $res ? mysqli_fetch_assoc($res) : null;
+  mysqli_stmt_close($st);
+  if (!$okc) fail("no autorizado",403);
+
+  $sql = "SELECT u.id estudiante_id,u.usuario,u.nombres,u.apellidos,u.cedula,
+                 n.p1_deberes,n.p1_prueba,n.p1_lab,n.p1_examen,n.p1_total,
+                 n.p2_deberes,n.p2_prueba,n.p2_lab,n.p2_examen,n.p2_total,
+                 n.p3_deberes,n.p3_prueba,n.p3_lab,n.p3_examen,n.p3_total,
+                 n.nota_final,n.estado
+          FROM matriculas m
+          JOIN usuarios u ON u.id=m.estudiante_id
+          LEFT JOIN notas n ON n.curso_id=m.curso_id AND n.estudiante_id=m.estudiante_id
+          WHERE m.curso_id=? AND m.estado='ACTIVA'
+          ORDER BY u.apellidos ASC, u.nombres ASC";
+  $st = mysqli_prepare($enlace, $sql);
+  if (!$st) fail("error interno",500);
+  mysqli_stmt_bind_param($st, "i", $curso_id);
+  mysqli_stmt_execute($st);
+  $res = mysqli_stmt_get_result($st);
+  $rows = [];
+  while ($res && ($row = mysqli_fetch_assoc($res))) $rows[] = $row;
+  mysqli_stmt_close($st);
+
+  ok(["rows"=>$rows]);
+}
+
+if ($action === "guardar_notas") {
+  require_active_user();
+  require_perm("notas","editar");
+  global $enlace;
+
+  $curso_id = (int)($body["curso_id"] ?? 0);
+  $items = $body["items"] ?? [];
+  if ($curso_id<=0 || !is_array($items)) fail("datos inválidos");
+
+  $docente_id = (int)$_SESSION["usuario_id"];
+  $st = mysqli_prepare($enlace, "SELECT id FROM cursos WHERE id=? AND docente_id=? AND activo=1 LIMIT 1");
+  if (!$st) fail("error interno",500);
+  mysqli_stmt_bind_param($st, "ii", $curso_id,$docente_id);
+  mysqli_stmt_execute($st);
+  $res = mysqli_stmt_get_result($st);
+  $okc = $res ? mysqli_fetch_assoc($res) : null;
+  mysqli_stmt_close($st);
+  if (!$okc) fail("no autorizado",403);
+
+  mysqli_begin_transaction($enlace);
+
+  $sql = "INSERT INTO notas(curso_id,estudiante_id,
+            p1_deberes,p1_prueba,p1_lab,p1_examen,
+            p2_deberes,p2_prueba,p2_lab,p2_examen,
+            p3_deberes,p3_prueba,p3_lab,p3_examen,
+            actualizado_por)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          ON DUPLICATE KEY UPDATE
+            p1_deberes=VALUES(p1_deberes), p1_prueba=VALUES(p1_prueba), p1_lab=VALUES(p1_lab), p1_examen=VALUES(p1_examen),
+            p2_deberes=VALUES(p2_deberes), p2_prueba=VALUES(p2_prueba), p2_lab=VALUES(p2_lab), p2_examen=VALUES(p2_examen),
+            p3_deberes=VALUES(p3_deberes), p3_prueba=VALUES(p3_prueba), p3_lab=VALUES(p3_lab), p3_examen=VALUES(p3_examen),
+            actualizado_por=VALUES(actualizado_por)";
+  $st = mysqli_prepare($enlace, $sql);
+  if (!$st) { mysqli_rollback($enlace); fail("error interno",500); }
+
+  foreach ($items as $it) {
+    $eid = (int)($it["estudiante_id"] ?? 0);
+    if ($eid<=0) { mysqli_stmt_close($st); mysqli_rollback($enlace); fail("estudiante inválido"); }
+
+    $p1d = (float)($it["p1_deberes"] ?? 0);
+    $p1p = (float)($it["p1_prueba"] ?? 0);
+    $p1l = (float)($it["p1_lab"] ?? 0);
+    $p1e = (float)($it["p1_examen"] ?? 0);
+
+    $p2d = (float)($it["p2_deberes"] ?? 0);
+    $p2p = (float)($it["p2_prueba"] ?? 0);
+    $p2l = (float)($it["p2_lab"] ?? 0);
+    $p2e = (float)($it["p2_examen"] ?? 0);
+
+    $p3d = (float)($it["p3_deberes"] ?? 0);
+    $p3p = (float)($it["p3_prueba"] ?? 0);
+    $p3l = (float)($it["p3_lab"] ?? 0);
+    $p3e = (float)($it["p3_examen"] ?? 0);
+
+    mysqli_stmt_bind_param($st, "iidddddddddddddi",
+      $curso_id,$eid,
+      $p1d,$p1p,$p1l,$p1e,
+      $p2d,$p2p,$p2l,$p2e,
+      $p3d,$p3p,$p3l,$p3e,
+      $docente_id
+    );
+
+    if (!mysqli_stmt_execute($st)) {
+      $e = mysqli_stmt_error($st);
+      mysqli_stmt_close($st);
+      mysqli_rollback($enlace);
+      fail($e ?: "no se pudo guardar", 400);
+    }
+  }
+
+  mysqli_stmt_close($st);
+  mysqli_commit($enlace);
+
+  audit("notas_guardar","notas",$curso_id,"guardó notas curso $curso_id");
+  ok();
+}
+
+/* =========================
+   reportes (JSON)
+   ========================= */
+
+if ($action === "reporte_horario_docente") {
+  require_active_user();
+  require_perm("horarios","ver");
+  global $enlace;
+
+  $docente_id = (int)$_SESSION["usuario_id"];
+  $sql = "SELECT id,nombre,paralelo,periodo,dia_semana,
+                 TIME_FORMAT(hora_inicio,'%H:%i') hora_inicio,
+                 TIME_FORMAT(hora_fin,'%H:%i') hora_fin,
+                 aula
+          FROM cursos
+          WHERE activo=1 AND docente_id=?
+          ORDER BY periodo DESC, dia_semana ASC, hora_inicio ASC";
+  $st = mysqli_prepare($enlace, $sql);
+  if (!$st) fail("error interno",500);
+  mysqli_stmt_bind_param($st, "i", $docente_id);
+  mysqli_stmt_execute($st);
+  $res = mysqli_stmt_get_result($st);
+  $rows = [];
+  while ($res && ($row = mysqli_fetch_assoc($res))) $rows[] = $row;
+  mysqli_stmt_close($st);
+  ok(["rows"=>$rows]);
+}
+
+if ($action === "reporte_notas_estudiante") {
+  require_active_user();
+  require_perm("reportes","ver");
+  global $enlace;
+
+  $eid = (int)$_SESSION["usuario_id"];
+
+  $sql = "SELECT c.nombre,c.paralelo,c.periodo,
+                 n.p1_total,n.p2_total,n.p3_total,n.nota_final,n.estado
+          FROM matriculas m
+          JOIN cursos c ON c.id=m.curso_id
+          LEFT JOIN notas n ON n.curso_id=m.curso_id AND n.estudiante_id=m.estudiante_id
+          WHERE m.estudiante_id=? AND m.estado='ACTIVA' AND c.activo=1
+          ORDER BY c.periodo DESC, c.nombre ASC";
+  $st = mysqli_prepare($enlace, $sql);
+  if (!$st) fail("error interno",500);
+  mysqli_stmt_bind_param($st, "i", $eid);
+  mysqli_stmt_execute($st);
+  $res = mysqli_stmt_get_result($st);
+  $rows = [];
+  while ($res && ($row = mysqli_fetch_assoc($res))) $rows[] = $row;
+  mysqli_stmt_close($st);
+
+  ok(["rows"=>$rows]);
 }
 
 fail("acción inválida", 404);

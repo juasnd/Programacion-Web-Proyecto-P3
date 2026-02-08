@@ -33,5 +33,20 @@ const Api = (() => {
 
     permisos_get: () => req("permisos_get"),
     permisos_set: (p) => req("permisos_set", "POST", p),
+    cursos_list: () => req("cursos_list"),
+cursos_create: (p) => req("cursos_create","POST",p),
+cursos_update: (p) => req("cursos_update","POST",p),
+cursos_delete: (p) => req("cursos_delete","POST",p),
+
+matriculas_create: (p) => req("matriculas_create","POST",p),
+matriculas_anular: (p) => req("matriculas_anular","POST",p),
+
+mis_cursos: () => req("mis_cursos"),
+curso_estudiantes: (curso_id) => req(`curso_estudiantes&curso_id=${encodeURIComponent(curso_id)}`),
+guardar_notas: (p) => req("guardar_notas","POST",p),
+
+reporte_horario_docente: () => req("reporte_horario_docente"),
+reporte_notas_estudiante: () => req("reporte_notas_estudiante"),
+
   };
 })();

@@ -1,7 +1,11 @@
+// /js/app.js
 function $(sel) { return document.querySelector(sel); }
 function $$(sel) { return document.querySelectorAll(sel); }
 
 let clockTimer = null;
+
+// cache simple para no golpear el API a cada rato
+let USERS_CACHE = { loaded: false, data: [], at: 0 };
 
 function ensureApp() {
   let root = $("#app");
@@ -12,10 +16,7 @@ function ensureApp() {
   }
   return root;
 }
-
-function setView(html) {
-  ensureApp().innerHTML = html;
-}shell
+function setView(html) { ensureApp().innerHTML = html; }
 
 function escapeHtml(s) {
   return String(s ?? "")
@@ -30,7 +31,6 @@ function hasPerm(me, mod, acc) {
   if (p.includes("*")) return true;
   return p.includes(`${mod}.${acc}`);
 }
-
 function hasAnyPerm(me, mod) {
   const p = me?.perms || [];
   if (p.includes("*")) return true;
@@ -38,41 +38,25 @@ function hasAnyPerm(me, mod) {
 }
 
 function stopClock() {
-  if (clockTimer) {
-    clearInterval(clockTimer);
-    clockTimer = null;
-  }
+  if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
 }
-
 function updateDateTime() {
   const now = new Date();
   const dateElement = $("#currentDate");
   const timeElement = $("#currentTime");
-
   if (dateElement) {
     const options = { weekday: "long", year: "numeric", month: "long", day: "numeric" };
-    dateElement.textContent = now.toLocaleDateString("es-ES", options);
+    dateElement.textContent = now.toLocaleDateString("es-EC", options);
   }
-
   if (timeElement) {
-    timeElement.textContent = now.toLocaleTimeString("es-ES", {
-      hour12: false,
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
+    timeElement.textContent = now.toLocaleTimeString("es-EC", {
+      hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit",
     });
   }
 }
+function startClock() { stopClock(); updateDateTime(); clockTimer = setInterval(updateDateTime, 1000); }
 
-function startClock() {
-  stopClock();
-  updateDateTime();
-  clockTimer = setInterval(updateDateTime, 1000);
-}
-
-function onlyDigits(s) {
-  return String(s || "").replace(/\D+/g, "");
-}
+function onlyDigits(s) { return String(s || "").replace(/\D+/g, ""); }
 
 function calcEdad(fechaISO) {
   if (!fechaISO) return null;
@@ -90,6 +74,30 @@ function fullName(me) {
   return n || (me?.usuario || "");
 }
 
+function diaNombre(n) {
+  const map = { 1:"lunes",2:"martes",3:"miércoles",4:"jueves",5:"viernes",6:"sábado",7:"domingo" };
+  return map[Number(n)] || String(n || "");
+}
+
+function msgBox(kind, text) {
+  return `<div class="message ${kind}">${escapeHtml(text)}</div>`;
+}
+
+function niceTitle(key) {
+  const map = {
+    dashboard: "dashboard",
+    usuarios: "usuarios",
+    roles: "roles",
+    permisos: "permisos",
+    cursos: "cursos",
+    matriculas: "matriculación",
+    notas: "notas",
+    reportes: "reportes",
+    login: "inicio de sesión",
+  };
+  return map[key] || key;
+}
+
 /* ====== pagination ====== */
 function paginate(arr, page, perPage) {
   const total = arr.length;
@@ -102,14 +110,10 @@ function paginate(arr, page, perPage) {
 function renderPager(containerSel, page, totalPages, onGo) {
   const el = $(containerSel);
   if (!el) return;
-
-  if (totalPages <= 1) {
-    el.innerHTML = "";
-    return;
-  }
+  if (totalPages <= 1) { el.innerHTML = ""; return; }
 
   const btn = (label, p, disabled, active = false) => `
-    <button class="pager-btn ${active ? "active" : ""}" ${disabled ? "disabled" : ""} data-p="${p}">
+    <button class="pager-btn ${active ? "active" : ""}" ${disabled ? "disabled" : ""} data-p="${p}" type="button">
       ${label}
     </button>
   `;
@@ -141,21 +145,76 @@ function renderPager(containerSel, page, totalPages, onGo) {
   });
 }
 
-/* ===== shell (topbar con nav, sin sidebar) ===== */
+/* =========================
+   usuarios helper (para selects de estudiantes/docentes)
+   ========================= */
+
+// intenta detectar "docente/estudiante" por rol_nombre
+function roleKind(u) {
+  const r = String(u?.rol_nombre || "").toLowerCase();
+  if (r.includes("docente") || r.includes("prof")) return "docente";
+  if (r.includes("estudiante") || r.includes("alumno")) return "estudiante";
+  return "";
+}
+
+async function ensureUsersCache(force = false) {
+  const now = Date.now();
+  const ttlMs = 60_000; // 1 min
+  if (!force && USERS_CACHE.loaded && (now - USERS_CACHE.at) < ttlMs) return USERS_CACHE.data;
+
+  const r = await Api.usuarios_list();
+  if (!r.ok) return null;
+
+  USERS_CACHE.loaded = true;
+  USERS_CACHE.data = Array.isArray(r.data) ? r.data : [];
+  USERS_CACHE.at = now;
+  return USERS_CACHE.data;
+}
+
+function userLabel(u) {
+  const nombre = `${u.apellidos || ""} ${u.nombres || ""}`.trim();
+  const ced = u.cedula ? ` • ${u.cedula}` : "";
+  const rol = u.rol_nombre ? ` • ${u.rol_nombre}` : "";
+  return `${nombre || u.usuario || ("#" + u.id)}${ced}${rol}`;
+}
+
+function fillUserSelect(selEl, users, placeholder = "selecciona...") {
+  if (!selEl) return;
+  selEl.innerHTML = `
+    <option value="">${escapeHtml(placeholder)}</option>
+    ${(users || []).map(u => `<option value="${u.id}">${escapeHtml(userLabel(u))}</option>`).join("")}
+  `;
+}
+
+function bindCedulaPicker(inputEl, users, onPick) {
+  if (!inputEl) return;
+  inputEl.addEventListener("input", () => {
+    const ced = onlyDigits(inputEl.value);
+    if (ced.length < 10) return;
+    const hit = (users || []).find(u => String(u.cedula || "") === ced);
+    if (hit) onPick(hit);
+  });
+}
+
+/* =========================
+   shell (layout)
+   ========================= */
 function shell(me, active, contentHtml) {
-  const showUsuarios = hasAnyPerm(me, "Usuarios");
-  const showRoles = hasAnyPerm(me, "Roles");
-  const showPermisos = hasAnyPerm(me, "Permisos");
+  const showUsuarios   = hasAnyPerm(me, "usuarios");
+  const showRoles      = hasAnyPerm(me, "roles");
+  const showPermisos   = hasAnyPerm(me, "permisos");
+  const showCursos     = hasAnyPerm(me, "cursos");
+  const showMatriculas = hasAnyPerm(me, "matriculas");
+  const showNotas      = hasAnyPerm(me, "notas");
+  const showReportes   = hasAnyPerm(me, "reportes") || hasAnyPerm(me, "horarios");
 
   const navItem = (id, label, show) => show ? `
     <a class="nav-link ${active === id ? "active" : ""}" href="#${id}">${label}</a>
   ` : "";
 
-  const avatarChar = escapeHtml(((me.nombres || me.usuario || "u")[0] || "u").toUpperCase());
-  const rolName = escapeHtml(me.rol_nombre || "sin rol");
-const nombreMostrado = escapeHtml(me.usuario || "");
-
-
+  const avatarChar = escapeHtml(((me?.nombres || me?.usuario || "u")[0] || "u").toUpperCase());
+  const rolName = escapeHtml(me?.rol_nombre || "sin rol");
+  const nombreMostrado = escapeHtml(me?.usuario || "");
 
   return `
     <div class="topbar">
@@ -168,14 +227,18 @@ const nombreMostrado = escapeHtml(me.usuario || "");
       </div>
 
       <nav class="topnav" aria-label="navegación">
-        <a class="nav-link ${active === "Dashboard" ? "active" : ""}" href="#dashboard">dashboard</a>
-        ${navItem("usuarios", "Usuarios", showUsuarios)}
-        ${navItem("roles", "Roles", showRoles)}
-        ${navItem("permisos", "Permisos", showPermisos)}
+        <a class="nav-link ${active === "dashboard" ? "active" : ""}" href="#dashboard">dashboard</a>
+        ${navItem("usuarios", "usuarios", showUsuarios)}
+        ${navItem("roles", "roles", showRoles)}
+        ${navItem("permisos", "permisos", showPermisos)}
+        ${navItem("cursos", "cursos", showCursos)}
+        ${navItem("matriculas", "matriculación", showMatriculas)}
+        ${navItem("notas", "notas", showNotas)}
+        ${navItem("reportes", "reportes", showReportes)}
       </nav>
 
       <div class="topbar-right">
-        <div class="datetime-display">
+        <div class="datetime-display" aria-label="fecha y hora">
           <div class="current-date" id="currentDate">cargando...</div>
           <div class="current-time" id="currentTime">--:--:--</div>
         </div>
@@ -185,23 +248,26 @@ const nombreMostrado = escapeHtml(me.usuario || "");
 
     <main class="content-area">
       <div class="seccion-barra">
-      <div class="seccion-titulo">${escapeHtml(active)}</div>
-      <div class="seccion-acciones" id="accionesSeccion"></div>
+        <div class="seccion-titulo">${escapeHtml(niceTitle(active))}</div>
+        <div class="seccion-acciones" id="accionesSeccion"></div>
       </div>
       <div id="content">${contentHtml}</div>
     </main>
   `;
 }
 
+/* =========================
+   login
+   ========================= */
 function loginView(msg = "") {
   stopClock();
   setView(`
     <div class="login-wrapper">
       <div class="login-box fade-in">
         <div class="login-logo">sistema web</div>
-        <div class="login-subtitle">gestión de usuarios y roles</div>
+        <div class="login-subtitle">gestión académica</div>
 
-        ${msg ? `<div id="msg">${msg}</div>` : `<div id="msg"></div>`}
+        <div id="msg">${msg || ""}</div>
 
         <input id="usuario" class="login-input" placeholder="usuario" autocomplete="username" />
         <input id="password" class="login-input" placeholder="contraseña" type="password" autocomplete="current-password" />
@@ -210,55 +276,53 @@ function loginView(msg = "") {
     </div>
   `);
 
-  $("#btnLogin").onclick = async () => {
-    const usuario = $("#usuario").value;
-    const password = $("#password").value;
+  const doLogin = async () => {
+    const usuario = ($("#usuario").value || "").trim();
+    const password = ($("#password").value || "").trim();
 
     if (!usuario || !password) {
-      $("#msg").innerHTML = `<div class="message info">complete todos los campos</div>`;
+      $("#msg").innerHTML = msgBox("info", "complete todos los campos");
       return;
     }
 
     const r = await Api.login(usuario, password);
     if (!r.ok) {
-      $("#msg").innerHTML = `<div class="message info">${escapeHtml(r.error)}</div>`;
+      $("#msg").innerHTML = msgBox("info", r.error || "error");
       return;
     }
 
     location.hash = "#dashboard";
     router();
   };
+
+  $("#btnLogin").onclick = doLogin;
+  $("#password").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+  $("#usuario").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
 }
 
+/* =========================
+   dashboard
+   ========================= */
 async function viewDashboard(me) {
   const cards = [];
 
-  if (hasAnyPerm(me, "usuarios")) {
+  const pushCard = (cond, href, title, desc) => {
+    if (!cond) return;
     cards.push(`
-      <a class="module-card" href="#usuarios">
-        <h3>usuarios</h3>
-        <p>administra usuarios del sistema.</p>
+      <a class="module-card" href="#${href}">
+        <h3>${escapeHtml(title)}</h3>
+        <p>${escapeHtml(desc)}</p>
       </a>
     `);
-  }
+  };
 
-  if (hasAnyPerm(me, "roles")) {
-    cards.push(`
-      <a class="module-card" href="#roles">
-        <h3>roles</h3>
-        <p>crea roles del sistema.</p>
-      </a>
-    `);
-  }
-
-  if (hasAnyPerm(me, "permisos")) {
-    cards.push(`
-      <a class="module-card" href="#permisos">
-        <h3>permisos</h3>
-        <p>asigna permisos por rol.</p>
-      </a>
-    `);
-  }
+  pushCard(hasAnyPerm(me, "usuarios"), "usuarios", "usuarios", "administra usuarios del sistema.");
+  pushCard(hasAnyPerm(me, "roles"), "roles", "roles", "crea roles del sistema.");
+  pushCard(hasAnyPerm(me, "permisos"), "permisos", "permisos", "asigna permisos por rol.");
+  pushCard(hasAnyPerm(me, "cursos"), "cursos", "cursos", "gestiona cursos y horarios.");
+  pushCard(hasAnyPerm(me, "matriculas"), "matriculas", "matriculación", "matricula con validación de choques.");
+  pushCard(hasAnyPerm(me, "notas"), "notas", "notas", "ingreso de notas por curso.");
+  pushCard(hasAnyPerm(me, "reportes") || hasAnyPerm(me, "horarios"), "reportes", "reportes", "horario y notas.");
 
   setView(shell(me, "dashboard", `
     <div class="dashboard-container fade-in">
@@ -277,6 +341,9 @@ async function viewDashboard(me) {
   startClock();
 }
 
+/* =========================
+   usuarios (sin cambios grandes aquí)
+   ========================= */
 function showEditUserModal(me, user, roles, onSave) {
   const edadIni = calcEdad(user.fecha_nacimiento);
 
@@ -300,9 +367,9 @@ function showEditUserModal(me, user, roles, onSave) {
   `;
 
   const modalHtml = `
-    <div class="modal-overlay" id="editModal">
+    <div class="modal-overlay" id="editModal" role="dialog" aria-modal="true">
       <div class="modal-content">
-        <button class="modal-close" id="closeModal" type="button">&times;</button>
+        <button class="modal-close" id="closeModal" type="button" aria-label="cerrar">&times;</button>
         <div class="modal-header">
           <h3>editar usuario</h3>
         </div>
@@ -370,10 +437,7 @@ function showEditUserModal(me, user, roles, onSave) {
   });
 
   $("#saveEdit").onclick = async () => {
-    if (!hasPerm(me, "usuarios", "editar")) {
-      alert("sin permiso para editar");
-      return;
-    }
+    if (!hasPerm(me, "usuarios", "editar")) { alert("sin permiso para editar"); return; }
 
     const usuario = $("#edit_usuario").value.trim().toLowerCase();
     const nombres = $("#edit_nombres").value.trim();
@@ -383,25 +447,12 @@ function showEditUserModal(me, user, roles, onSave) {
     const activo = Number($("#edit_activo").value);
     const password = $("#edit_password").value.trim();
 
-    if (!usuario || !nombres || !apellidos || !cedula || !fecha_nacimiento) {
-      alert("complete usuario, nombres, apellidos, cédula y fecha de nacimiento");
-      return;
-    }
-
-    if (cedula.length !== 10) {
-      alert("la cédula debe tener 10 dígitos");
-      return;
-    }
+    if (!usuario || !nombres || !apellidos || !cedula || !fecha_nacimiento) { alert("complete los campos"); return; }
+    if (cedula.length !== 10) { alert("la cédula debe tener 10 dígitos"); return; }
 
     const edad = calcEdad(fecha_nacimiento);
-    if (edad === null) {
-      alert("fecha de nacimiento inválida");
-      return;
-    }
-    if (edad < 18) {
-      alert("solo mayores de edad (18+)");
-      return;
-    }
+    if (edad === null) { alert("fecha de nacimiento inválida"); return; }
+    if (edad < 18) { alert("solo mayores de edad (18+)"); return; }
 
     const data = { id: Number(user.id), usuario, nombres, apellidos, cedula, fecha_nacimiento, activo };
 
@@ -411,28 +462,22 @@ function showEditUserModal(me, user, roles, onSave) {
     }
 
     if (password) {
-      if (password.length < 8) {
-        alert("la contraseña debe tener al menos 8 caracteres");
-        return;
-      }
+      if (password.length < 8) { alert("la contraseña debe tener al menos 8 caracteres"); return; }
       data.password = password;
     }
 
     const r = await Api.usuarios_update(data);
-    if (r.ok) {
-      close();
-      onSave();
-    } else {
-      alert("error: " + r.error);
-    }
+    if (r.ok) { close(); onSave(); }
+    else alert("error: " + (r.error || "error"));
   };
+
+  document.addEventListener("keydown", function escClose(e) {
+    if (e.key === "Escape") { close(); document.removeEventListener("keydown", escClose); }
+  });
 }
 
 async function viewUsuarios(me) {
-  if (!hasAnyPerm(me, "usuarios")) {
-    location.hash = "#dashboard";
-    return router();
-  }
+  if (!hasAnyPerm(me, "usuarios")) { location.hash = "#dashboard"; return router(); }
 
   const rolesRes = me.is_admin ? await Api.roles_list() : { ok: true, data: [] };
   const roles = rolesRes.ok ? rolesRes.data : [];
@@ -517,16 +562,16 @@ async function viewUsuarios(me) {
         </table>
       </div>
       <div id="uPager" class="pager-wrap"></div>
-      ` : `<div class="message info">no tienes permiso para ver registros de usuarios</div>`}
+      ` : `<div class="message info">no tienes permiso para ver usuarios</div>`}
     </div>
   `));
 
   $("#btnLogout").onclick = logoutTotal;
   startClock();
 
-  function msg(okv, text) {
-    $("#uMsg").innerHTML = `<div class="message info">${escapeHtml(text)}</div>`;
-    setTimeout(() => ($("#uMsg").innerHTML = ""), 4000);
+  function msg(text) {
+    $("#uMsg").innerHTML = msgBox("info", text);
+    setTimeout(() => ($("#uMsg").innerHTML = ""), 3500);
   }
 
   if (canCreate) {
@@ -544,26 +589,22 @@ async function viewUsuarios(me) {
       const fecha_nacimiento = $("#u_fnac").value;
       const password = $("#u_pass").value;
 
-      if (!usuario || !nombres || !apellidos || !cedula || !fecha_nacimiento || !password) {
-        return msg(false, "complete todos los campos");
-      }
+      if (!usuario || !nombres || !apellidos || !cedula || !fecha_nacimiento || !password) return msg("complete todos los campos");
+      if (cedula.length !== 10) return msg("la cédula debe tener 10 dígitos");
 
-      if (cedula.length !== 10) return msg(false, "la cédula debe tener 10 dígitos");
       const edad = calcEdad(fecha_nacimiento);
-      if (edad === null) return msg(false, "fecha de nacimiento inválida");
-      if (edad < 18) return msg(false, "solo mayores de edad (18+)");
-
-      if (password.length < 8) return msg(false, "contraseña mínima 8 caracteres");
+      if (edad === null) return msg("fecha de nacimiento inválida");
+      if (edad < 18) return msg("solo mayores de edad (18+)");
+      if (password.length < 8) return msg("contraseña mínima 8 caracteres");
 
       const payload = { usuario, nombres, apellidos, cedula, fecha_nacimiento, password };
-
       if (me.is_admin && $("#u_rol")) {
         const rol_id = $("#u_rol").value;
         if (rol_id !== "") payload.rol_id = Number(rol_id);
       }
 
       const r = await Api.usuarios_create(payload);
-      msg(r.ok, r.ok ? "usuario creado" : r.error);
+      msg(r.ok ? "usuario creado" : (r.error || "error"));
 
       if (r.ok) {
         $("#u_usuario").value = "";
@@ -575,6 +616,7 @@ async function viewUsuarios(me) {
         if (h) h.textContent = "";
         $("#u_pass").value = "";
         if ($("#u_rol")) $("#u_rol").value = "";
+        USERS_CACHE.loaded = false; // refrescar cache
         if (canList) cargarUsuarios();
       }
     };
@@ -582,7 +624,7 @@ async function viewUsuarios(me) {
 
   let usersData = [];
   let uPage = 1;
-  const perPage = 4;
+  const perPage = 6;
 
   function renderUsersPage() {
     const out = paginate(usersData, uPage, perPage);
@@ -595,7 +637,7 @@ async function viewUsuarios(me) {
 
       return `
         <tr>
-          <td><strong>#${u.id}</strong></td>
+          <td><strong>#${escapeHtml(u.id)}</strong></td>
           <td><strong>${escapeHtml(u.usuario)}</strong></td>
           <td>${escapeHtml(u.nombres || "")}</td>
           <td>${escapeHtml(u.apellidos || "")}</td>
@@ -620,23 +662,23 @@ async function viewUsuarios(me) {
     $$("[data-del]").forEach(b => {
       if (b.disabled) return;
       b.onclick = async () => {
-        if (!canDelete) return msg(false, "sin permiso para eliminar");
-        if (!confirm("eliminar usuario?")) return;
+        if (!canDelete) return msg("sin permiso para eliminar");
+        if (!confirm("desactivar usuario?")) return;
         const id = Number(b.dataset.del);
         const rr = await Api.usuarios_delete({ id });
-        msg(rr.ok, rr.ok ? "usuario eliminado" : rr.error);
-        if (rr.ok) cargarUsuarios();
+        msg(rr.ok ? "usuario desactivado" : (rr.error || "error"));
+        if (rr.ok) { USERS_CACHE.loaded = false; cargarUsuarios(); }
       };
     });
 
     $$("[data-edit]").forEach(b => {
       if (b.disabled) return;
       b.onclick = async () => {
-        if (!canEdit) return msg(false, "sin permiso para editar");
+        if (!canEdit) return msg("sin permiso para editar");
         const id = Number(b.dataset.edit);
         const user = usersData.find(x => Number(x.id) === id);
         if (!user) return;
-        showEditUserModal(me, user, roles, cargarUsuarios);
+        showEditUserModal(me, user, roles, async () => { USERS_CACHE.loaded = false; await cargarUsuarios(); });
       };
     });
 
@@ -652,7 +694,7 @@ async function viewUsuarios(me) {
 
     const r = await Api.usuarios_list();
     if (!r.ok) {
-      $("#uTableBody").innerHTML = `<tr><td colspan="9" class="td-center td-error">${escapeHtml(r.error)}</td></tr>`;
+      $("#uTableBody").innerHTML = `<tr><td colspan="9" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
       return;
     }
 
@@ -671,12 +713,8 @@ async function viewUsuarios(me) {
 }
 
 /* ===================== ROLES ===================== */
-
 async function viewRoles(me) {
-  if (!hasAnyPerm(me, "roles")) {
-    location.hash = "#dashboard";
-    return router();
-  }
+  if (!hasAnyPerm(me, "roles")) { location.hash = "#dashboard"; return router(); }
 
   const canList = hasPerm(me, "roles", "ver");
   const canCreate = hasPerm(me, "roles", "crear");
@@ -721,7 +759,7 @@ async function viewRoles(me) {
         </table>
       </div>
       <div id="rPager" class="pager-wrap"></div>
-      ` : `<div class="message info">no tienes permiso para ver registros de roles</div>`}
+      ` : `<div class="message info">no tienes permiso para ver roles</div>`}
 
       ${(!me.is_admin && canList) ? `<div class="message info">nota: editar descripción de roles es solo para admin.</div>` : ``}
     </div>
@@ -730,14 +768,14 @@ async function viewRoles(me) {
   $("#btnLogout").onclick = logoutTotal;
   startClock();
 
-  function msg(okv, text) {
-    $("#rMsg").innerHTML = `<div class="message info">${escapeHtml(text)}</div>`;
-    setTimeout(() => ($("#rMsg").innerHTML = ""), 4000);
+  function msg(text) {
+    $("#rMsg").innerHTML = msgBox("info", text);
+    setTimeout(() => ($("#rMsg").innerHTML = ""), 3500);
   }
 
   let rolesData = [];
   let rPage = 1;
-  const perPage = 4;
+  const perPage = 6;
 
   function renderRolesPage() {
     const out = paginate(rolesData, rPage, perPage);
@@ -749,7 +787,7 @@ async function viewRoles(me) {
 
       return `
         <tr>
-          <td><strong>#${x.id}</strong></td>
+          <td><strong>#${escapeHtml(x.id)}</strong></td>
           <td><strong>${escapeHtml(x.nombre)}</strong></td>
           <td>${escapeHtml(x.descripcion || "sin descripción")}</td>
           <td>
@@ -776,7 +814,7 @@ async function viewRoles(me) {
         if (desc === null) return;
 
         const rr = await Api.roles_update({ id, descripcion: desc.trim() });
-        msg(rr.ok, rr.ok ? "actualizado" : rr.error);
+        msg(rr.ok ? "actualizado" : (rr.error || "error"));
         if (rr.ok) cargarRoles();
       };
     });
@@ -793,7 +831,7 @@ async function viewRoles(me) {
 
     const r = await Api.roles_list();
     if (!r.ok) {
-      $("#rTableBody").innerHTML = `<tr><td colspan="5" class="td-center td-error">${escapeHtml(r.error)}</td></tr>`;
+      $("#rTableBody").innerHTML = `<tr><td colspan="5" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
       return;
     }
 
@@ -813,11 +851,11 @@ async function viewRoles(me) {
       const nombre = $("#r_nombre").value.trim().toLowerCase();
       const descripcion = $("#r_desc").value.trim();
 
-      if (!nombre) return msg(false, "nombre requerido");
-      if (!/^[a-z0-9_]{3,50}$/.test(nombre)) return msg(false, "nombre inválido (3-50, a-z 0-9 _)");
+      if (!nombre) return msg("nombre requerido");
+      if (!/^[a-z0-9_]{3,50}$/.test(nombre)) return msg("nombre inválido (3-50, a-z 0-9 _)");
 
       const rr = await Api.roles_create({ nombre, descripcion });
-      msg(rr.ok, rr.ok ? "rol creado" : rr.error);
+      msg(rr.ok ? "rol creado" : (rr.error || "error"));
 
       if (rr.ok) {
         $("#r_nombre").value = "";
@@ -831,12 +869,8 @@ async function viewRoles(me) {
 }
 
 /* ===================== PERMISOS ===================== */
-
 async function viewPermisos(me) {
-  if (!hasAnyPerm(me, "permisos")) {
-    location.hash = "#dashboard";
-    return router();
-  }
+  if (!hasAnyPerm(me, "permisos")) { location.hash = "#dashboard"; return router(); }
 
   if (!me.is_admin) {
     setView(shell(me, "permisos", `<div class="message info">solo administrador puede asignar permisos</div>`));
@@ -846,7 +880,7 @@ async function viewPermisos(me) {
   }
 
   if (!hasPerm(me, "permisos", "ver")) {
-    setView(shell(me, "permisos", `<div class="message info">no tienes permiso para ver registros de permisos</div>`));
+    setView(shell(me, "permisos", `<div class="message info">no tienes permiso para ver permisos</div>`));
     $("#btnLogout").onclick = logoutTotal;
     startClock();
     return;
@@ -854,11 +888,22 @@ async function viewPermisos(me) {
 
   const r = await Api.permisos_get();
   if (!r.ok) {
-    setView(shell(me, "permisos", `<div class="message info">${escapeHtml(r.error)}</div>`));
+    setView(shell(me, "permisos", `<div class="message info">${escapeHtml(r.error || "error")}</div>`));
     $("#btnLogout").onclick = logoutTotal;
     startClock();
     return;
   }
+
+  const modules = [
+    { m: "usuarios",    actions: ["ver","crear","editar","eliminar"] },
+    { m: "roles",       actions: ["ver","crear","editar","eliminar"] },
+    { m: "permisos",    actions: ["ver","editar"] },
+    { m: "cursos",      actions: ["ver","crear","editar","eliminar"] },
+    { m: "matriculas",  actions: ["crear","anular"] },
+    { m: "notas",       actions: ["ver","editar"] },
+    { m: "reportes",    actions: ["ver"] },
+    { m: "horarios",    actions: ["ver"] },
+  ];
 
   setView(shell(me, "permisos", `
     <div class="dashboard-container fade-in">
@@ -872,20 +917,12 @@ async function viewPermisos(me) {
           </select>
         </div>
 
-        <div class="checkbox-group">
-          <h4>usuarios</h4>
-          <div class="checkbox-row" id="pu"></div>
-        </div>
-
-        <div class="checkbox-group">
-          <h4>roles</h4>
-          <div class="checkbox-row" id="pr"></div>
-        </div>
-
-        <div class="checkbox-group">
-          <h4>permisos</h4>
-          <div class="checkbox-row" id="pp"></div>
-        </div>
+        ${modules.map(x => `
+          <div class="checkbox-group">
+            <h4>${escapeHtml(x.m)}</h4>
+            <div class="checkbox-row" id="p_${escapeHtml(x.m)}"></div>
+          </div>
+        `).join("")}
 
         <div class="perm-actions">
           <button class="btn btn-primary" id="btnGuardarP" type="button">guardar</button>
@@ -901,29 +938,27 @@ async function viewPermisos(me) {
   $("#btnLogout").onclick = logoutTotal;
   startClock();
 
-  const actions = ["ver", "crear", "editar", "eliminar"];
-
-  function renderChecks(mod, elId) {
-    $(elId).innerHTML = actions.map(a => `
+  function renderChecks(mod, actions) {
+    const el = $(`#p_${mod}`);
+    if (!el) return;
+    el.innerHTML = actions.map(a => `
       <div class="checkbox-item">
         <input type="checkbox" id="${mod}_${a}" />
-        <label for="${mod}_${a}">${a}</label>
+        <label for="${mod}_${a}">${escapeHtml(a)}</label>
       </div>
     `).join("");
   }
 
-  renderChecks("usuarios", "#pu");
-  renderChecks("roles", "#pr");
-  renderChecks("permisos", "#pp");
+  modules.forEach(x => renderChecks(x.m, x.actions));
 
   const map = r.map || {};
 
   function loadRole(rolId) {
     const perms = new Set(map[String(rolId)] || []);
-    ["usuarios", "roles", "permisos"].forEach(m => {
-      actions.forEach(a => {
-        const cb = $(`#${m}_${a}`);
-        if (cb) cb.checked = perms.has(`${m}.${a}`);
+    modules.forEach(x => {
+      x.actions.forEach(a => {
+        const cb = $(`#${x.m}_${a}`);
+        if (cb) cb.checked = perms.has(`${x.m}.${a}`);
       });
     });
   }
@@ -932,87 +967,647 @@ async function viewPermisos(me) {
   loadRole($("#pRol").value);
 
   $("#btnSeleccionarTodos").onclick = () => {
-    ["usuarios", "roles", "permisos"].forEach(m => actions.forEach(a => {
-      const cb = $(`#${m}_${a}`);
+    modules.forEach(x => x.actions.forEach(a => {
+      const cb = $(`#${x.m}_${a}`);
       if (cb) cb.checked = true;
     }));
   };
 
   $("#btnDeseleccionarTodos").onclick = () => {
-    ["usuarios", "roles", "permisos"].forEach(m => actions.forEach(a => {
-      const cb = $(`#${m}_${a}`);
+    modules.forEach(x => x.actions.forEach(a => {
+      const cb = $(`#${x.m}_${a}`);
       if (cb) cb.checked = false;
     }));
   };
 
   $("#btnGuardarP").onclick = async () => {
     if (!hasPerm(me, "permisos", "editar") || !me.is_admin) {
-      $("#pMsg").innerHTML = `<div class="message info">sin permiso para editar (solo admin)</div>`;
+      $("#pMsg").innerHTML = msgBox("info", "sin permiso para editar (solo admin)");
       return;
     }
 
     const rol_id = Number($("#pRol").value);
     const selected = [];
-    ["usuarios", "roles", "permisos"].forEach(m => actions.forEach(a => {
-      const cb = $(`#${m}_${a}`);
-      if (cb && cb.checked) selected.push(`${m}.${a}`);
+    modules.forEach(x => x.actions.forEach(a => {
+      const cb = $(`#${x.m}_${a}`);
+      if (cb && cb.checked) selected.push(`${x.m}.${a}`);
     }));
 
     const rr = await Api.permisos_set({ rol_id, perms: selected });
-    $("#pMsg").innerHTML = `<div class="message info">${escapeHtml(rr.ok ? "guardado" : rr.error)}</div>`;
+    $("#pMsg").innerHTML = msgBox("info", rr.ok ? "guardado" : (rr.error || "error"));
 
     if (rr.ok) {
       map[String(rol_id)] = selected;
-      setTimeout(() => ($("#pMsg").innerHTML = ""), 2500);
+      setTimeout(() => ($("#pMsg").innerHTML = ""), 2200);
     }
   };
 }
 
+/* =========================
+   cursos (MEJORADO: asignar docente por select + cédula)
+   ========================= */
+async function viewCursos(me) {
+  if (!hasAnyPerm(me, "cursos")) { location.hash="#dashboard"; return router(); }
+
+  const canCreate = hasPerm(me, "cursos", "crear");
+  const canEdit = hasPerm(me, "cursos", "editar");
+  const canDelete = hasPerm(me, "cursos", "eliminar");
+
+  setView(shell(me, "cursos", `
+    <div class="dashboard-container fade-in">
+      <div id="cMsg"></div>
+
+      ${canCreate ? `
+      <div class="form-container">
+        <h3>crear curso</h3>
+        <div class="form-grid">
+          <div class="form-group">
+            <label>nombre</label>
+            <input id="c_nombre" class="form-control" placeholder="ej: matemáticas" />
+          </div>
+          <div class="form-group">
+            <label>paralelo</label>
+            <input id="c_paralelo" class="form-control" value="A" />
+          </div>
+          <div class="form-group">
+            <label>periodo</label>
+            <input id="c_periodo" class="form-control" placeholder="ej: 2026-1" />
+          </div>
+
+          <div class="form-group">
+            <label>docente (opcional)</label>
+            <select id="c_docente_sel" class="form-control select"></select>
+            <small class="hint">puedes buscar por cédula abajo.</small>
+          </div>
+
+          <div class="form-group">
+            <label>cédula del docente (opcional)</label>
+            <input id="c_docente_ced" class="form-control" placeholder="10 dígitos" maxlength="10" />
+          </div>
+
+          <div class="form-group">
+            <label>día</label>
+            <select id="c_dia" class="form-control select">
+              <option value="1">lunes</option><option value="2">martes</option><option value="3">miércoles</option>
+              <option value="4">jueves</option><option value="5">viernes</option><option value="6">sábado</option>
+              <option value="7">domingo</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>hora inicio</label>
+            <input id="c_hi" class="form-control" value="07:00" />
+          </div>
+          <div class="form-group">
+            <label>hora fin</label>
+            <input id="c_hf" class="form-control" value="08:00" />
+          </div>
+          <div class="form-group">
+            <label>aula</label>
+            <input id="c_aula" class="form-control" placeholder="ej: B-203" />
+          </div>
+        </div>
+
+        <div class="modal-actions" style="justify-content:flex-start; gap:10px;">
+          <button class="btn btn-primary" id="btnCrearC" type="button">crear</button>
+          <button class="btn btn-outline" id="btnRefDoc" type="button">recargar docentes</button>
+        </div>
+      </div>
+      ` : ``}
+
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>id</th>
+              <th>curso</th>
+              <th>paralelo</th>
+              <th>periodo</th>
+              <th>docente</th>
+              <th>horario</th>
+              <th>aula</th>
+              <th>acciones</th>
+            </tr>
+          </thead>
+          <tbody id="cTableBody">
+            <tr><td colspan="8" class="td-center">cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `));
+
+  $("#btnLogout").onclick = logoutTotal;
+  startClock();
+
+  const setMsg = (t, okk=false) => { $("#cMsg").innerHTML = msgBox(okk ? "success" : "info", t); };
+
+  // cargar docentes para el select
+  let docentes = [];
+  async function loadDocentes(force=false) {
+    const all = await ensureUsersCache(force);
+    if (!all) { setMsg("no se pudo cargar usuarios para docentes"); return; }
+    // preferimos rol docente; si no hay, mostramos todos para no bloquear
+    docentes = all.filter(u => roleKind(u) === "docente" && Number(u.activo) === 1);
+    if (docentes.length === 0) docentes = all.filter(u => Number(u.activo) === 1);
+
+    fillUserSelect($("#c_docente_sel"), docentes, "sin docente");
+    bindCedulaPicker($("#c_docente_ced"), docentes, (u) => { $("#c_docente_sel").value = String(u.id); });
+  }
+
+  async function loadCursos() {
+    const r = await Api.cursos_list();
+    if (!r.ok) {
+      $("#cTableBody").innerHTML = `<tr><td colspan="8" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
+      return;
+    }
+    const rows = r.rows || r.data || [];
+    $("#cTableBody").innerHTML = rows.length ? rows.map(x => {
+      const docente = x.docente_nombre ? escapeHtml(x.docente_nombre) : (x.docente_id ? `#${escapeHtml(x.docente_id)}` : "-");
+      const horario = `${escapeHtml(diaNombre(x.dia_semana))} ${escapeHtml(x.hora_inicio)}-${escapeHtml(x.hora_fin)}`;
+      const acciones = `
+        ${canEdit ? `<button class="btn btn-outline btn-sm" data-edit="${x.id}" type="button">editar</button>` : ""}
+        ${canDelete ? `<button class="btn btn-outline btn-sm" data-del="${x.id}" type="button">desactivar</button>` : ""}
+      `;
+      return `
+        <tr>
+          <td>${escapeHtml(x.id)}</td>
+          <td><strong>${escapeHtml(x.nombre)}</strong></td>
+          <td>${escapeHtml(x.paralelo)}</td>
+          <td>${escapeHtml(x.periodo)}</td>
+          <td>${docente}</td>
+          <td>${horario}</td>
+          <td>${escapeHtml(x.aula || "-")}</td>
+          <td><div class="actions-container">${acciones || "-"}</div></td>
+        </tr>
+      `;
+    }).join("") : `<tr><td colspan="8" class="td-center">sin cursos</td></tr>`;
+
+    $$("#cTableBody [data-del]").forEach(b => {
+      b.onclick = async () => {
+        const id = Number(b.dataset.del);
+        if (!confirm("desactivar curso #" + id + "?")) return;
+        const rr = await Api.cursos_delete({ id });
+        setMsg(rr.ok ? "curso desactivado" : (rr.error || "error"), rr.ok);
+        if (rr.ok) loadCursos();
+      };
+    });
+
+    $$("#cTableBody [data-edit]").forEach(b => {
+      b.onclick = async () => {
+        const id = Number(b.dataset.edit);
+        const row = rows.find(z => Number(z.id) === id);
+        if (!row) return;
+
+        // editar básico por prompts (incluye docente_id)
+        const nombre = prompt("nombre:", row.nombre); if (nombre === null) return;
+        const paralelo = prompt("paralelo:", row.paralelo); if (paralelo === null) return;
+        const periodo = prompt("periodo:", row.periodo); if (periodo === null) return;
+
+        // aquí mejor: permite poner docente_id directamente o dejar vacío
+        const docente_id = prompt("docente_id (vacío = sin docente):", row.docente_id ?? ""); if (docente_id === null) return;
+
+        const dia_semana = prompt("día (1=lun..7=dom):", row.dia_semana); if (dia_semana === null) return;
+        const hora_inicio = prompt("hora inicio (HH:MM):", row.hora_inicio); if (hora_inicio === null) return;
+        const hora_fin = prompt("hora fin (HH:MM):", row.hora_fin); if (hora_fin === null) return;
+        const aula = prompt("aula:", row.aula ?? ""); if (aula === null) return;
+
+        const rr = await Api.cursos_update({
+          id,
+          nombre: nombre.trim(),
+          paralelo: paralelo.trim(),
+          periodo: periodo.trim(),
+          docente_id: (docente_id.trim() === "" ? "" : Number(docente_id)),
+          dia_semana: Number(dia_semana),
+          hora_inicio: hora_inicio.trim(),
+          hora_fin: hora_fin.trim(),
+          aula: aula.trim()
+        });
+
+        setMsg(rr.ok ? "curso actualizado" : (rr.error || "error"), rr.ok);
+        if (rr.ok) loadCursos();
+      };
+    });
+  }
+
+  await loadCursos();
+  if (canCreate) await loadDocentes(false);
+
+  if ($("#btnRefDoc")) {
+    $("#btnRefDoc").onclick = async () => {
+      USERS_CACHE.loaded = false;
+      await loadDocentes(true);
+      setMsg("docentes recargados", true);
+    };
+  }
+
+  if (canCreate && $("#btnCrearC")) {
+    $("#btnCrearC").onclick = async () => {
+      const nombre = $("#c_nombre").value.trim();
+      const paralelo = $("#c_paralelo").value.trim() || "A";
+      const periodo = $("#c_periodo").value.trim();
+      const docenteSel = $("#c_docente_sel") ? $("#c_docente_sel").value : "";
+      const dia_semana = Number($("#c_dia").value);
+      const hora_inicio = $("#c_hi").value.trim();
+      const hora_fin = $("#c_hf").value.trim();
+      const aula = $("#c_aula").value.trim();
+
+      if (!nombre || !periodo) { setMsg("complete nombre y periodo"); return; }
+
+      const payload = { nombre, paralelo, periodo, dia_semana, hora_inicio, hora_fin, aula };
+      if (docenteSel !== "") payload.docente_id = Number(docenteSel);
+
+      const rr = await Api.cursos_create(payload);
+      setMsg(rr.ok ? "curso creado" : (rr.error || "error"), rr.ok);
+
+      if (rr.ok) {
+        $("#c_nombre").value = "";
+        $("#c_aula").value = "";
+        $("#c_docente_ced").value = "";
+        if ($("#c_docente_sel")) $("#c_docente_sel").value = "";
+        await loadCursos();
+      }
+    };
+  }
+}
+
+/* =========================
+   matriculación (MEJORADO: select estudiante + búsqueda por cédula)
+   ========================= */
+async function viewMatriculas(me) {
+  if (!hasAnyPerm(me, "matriculas")) { location.hash="#dashboard"; return router(); }
+
+  const canCreate = hasPerm(me, "matriculas", "crear");
+  const canAnular = hasPerm(me, "matriculas", "anular");
+
+  setView(shell(me, "matriculas", `
+    <div class="dashboard-container fade-in">
+      <div id="mMsg"></div>
+
+      <div class="form-container">
+        <h3>matricular</h3>
+
+        <div class="form-grid">
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label>estudiante</label>
+            <select id="m_est_sel" class="form-control select"></select>
+            <small class="hint">elige de la lista o busca por cédula abajo.</small>
+          </div>
+
+          <div class="form-group">
+            <label>cédula (búsqueda rápida)</label>
+            <input id="m_est_ced" class="form-control" placeholder="10 dígitos" maxlength="10" />
+          </div>
+
+          <div class="form-group">
+            <label>curso</label>
+            <select id="m_curso" class="form-control select"></select>
+          </div>
+        </div>
+
+        <div class="modal-actions" style="justify-content:flex-start; gap:10px;">
+          <button class="btn btn-primary" id="btnMatricular" type="button" ${canCreate ? "" : "disabled"}>matricular</button>
+          <button class="btn btn-outline" id="btnAnular" type="button" ${canAnular ? "" : "disabled"}>anular</button>
+          <button class="btn btn-outline" id="btnRefEst" type="button">recargar estudiantes</button>
+        </div>
+
+        <small class="hint">valida choque de horario en el mismo periodo.</small>
+      </div>
+    </div>
+  `));
+
+  $("#btnLogout").onclick = logoutTotal;
+  startClock();
+
+  const setMsg = (t, okk=false) => { $("#mMsg").innerHTML = msgBox(okk ? "success" : "info", t); };
+
+  // cursos
+  const r = await Api.cursos_list();
+  const cursos = (r.ok ? (r.rows || r.data || []) : []);
+  const selCurso = $("#m_curso");
+  selCurso.innerHTML = cursos.map(c => {
+    const label = `${c.periodo} - ${c.nombre} ${c.paralelo} (${diaNombre(c.dia_semana)} ${c.hora_inicio}-${c.hora_fin})`;
+    return `<option value="${c.id}">${escapeHtml(label)}</option>`;
+  }).join("") || `<option value="">sin cursos</option>`;
+
+  // estudiantes
+  let estudiantes = [];
+  async function loadEstudiantes(force=false) {
+    const all = await ensureUsersCache(force);
+    if (!all) { setMsg("no se pudo cargar usuarios para estudiantes"); return; }
+
+    estudiantes = all.filter(u => roleKind(u) === "estudiante" && Number(u.activo) === 1);
+    if (estudiantes.length === 0) estudiantes = all.filter(u => Number(u.activo) === 1); // fallback
+
+    fillUserSelect($("#m_est_sel"), estudiantes, "selecciona estudiante");
+    bindCedulaPicker($("#m_est_ced"), estudiantes, (u) => { $("#m_est_sel").value = String(u.id); });
+  }
+
+  await loadEstudiantes(false);
+
+  $("#btnRefEst").onclick = async () => {
+    USERS_CACHE.loaded = false;
+    await loadEstudiantes(true);
+    setMsg("estudiantes recargados", true);
+  };
+
+  const getSelectedEstudianteId = () => Number($("#m_est_sel")?.value || 0);
+
+  $("#btnMatricular").onclick = async () => {
+    if (!canCreate) return;
+
+    const estudiante_id = getSelectedEstudianteId();
+    const curso_id = Number(selCurso.value);
+
+    if (!estudiante_id || !curso_id) { setMsg("elige estudiante y curso"); return; }
+
+    const rr = await Api.matriculas_create({ curso_id, estudiante_id });
+    setMsg(rr.ok ? "matrícula registrada" : (rr.error || "error"), rr.ok);
+  };
+
+  $("#btnAnular").onclick = async () => {
+    if (!canAnular) return;
+
+    const estudiante_id = getSelectedEstudianteId();
+    const curso_id = Number(selCurso.value);
+
+    if (!estudiante_id || !curso_id) { setMsg("elige estudiante y curso"); return; }
+
+    const rr = await Api.matriculas_anular({ curso_id, estudiante_id });
+    setMsg(rr.ok ? "matrícula anulada" : (rr.error || "error"), rr.ok);
+  };
+}
+
+/* =========================
+   notas (docente)
+   ========================= */
+async function viewNotas(me) {
+  if (!hasAnyPerm(me, "notas")) { location.hash="#dashboard"; return router(); }
+
+  const canEdit = hasPerm(me, "notas", "editar");
+
+  setView(shell(me, "notas", `
+    <div class="dashboard-container fade-in">
+      <div id="nMsg"></div>
+
+      <div class="form-container">
+        <h3>ingreso de notas</h3>
+        <div class="form-grid">
+          <div class="form-group">
+            <label>mis cursos</label>
+            <select id="n_curso" class="form-control select"></select>
+          </div>
+        </div>
+
+        <div class="modal-actions" style="justify-content:flex-start; gap:10px;">
+          <button class="btn btn-primary" id="btnGuardarNotas" type="button" ${canEdit ? "" : "disabled"}>guardar</button>
+          <button class="btn btn-outline" id="btnRecargarNotas" type="button">recargar</button>
+        </div>
+        <small class="hint">ingresa valores numéricos. se guardan por estudiante.</small>
+      </div>
+
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>estudiante</th>
+              <th>p1 (4/5/4/7)</th>
+              <th>p2 (4/5/4/7)</th>
+              <th>p3 (4/5/4/7)</th>
+              <th>final</th>
+              <th>estado</th>
+            </tr>
+          </thead>
+          <tbody id="nTableBody">
+            <tr><td colspan="6" class="td-center">elige un curso</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `));
+
+  $("#btnLogout").onclick = logoutTotal;
+  startClock();
+
+  const setMsg = (t, okk=false) => { $("#nMsg").innerHTML = msgBox(okk ? "success" : "info", t); };
+
+  const cursosRes = await Api.mis_cursos();
+  const cursos = cursosRes.ok ? (cursosRes.rows || cursosRes.data || []) : [];
+  const sel = $("#n_curso");
+
+  sel.innerHTML = cursos.map(c => {
+    const label = `${c.periodo} - ${c.nombre} ${c.paralelo}`;
+    return `<option value="${c.id}">${escapeHtml(label)}</option>`;
+  }).join("") || `<option value="">sin cursos</option>`;
+
+  async function loadEstudiantes() {
+    const curso_id = Number(sel.value);
+    if (!curso_id) {
+      $("#nTableBody").innerHTML = `<tr><td colspan="6" class="td-center">sin curso</td></tr>`;
+      return;
+    }
+
+    const r = await Api.curso_estudiantes(curso_id);
+    if (!r.ok) {
+      $("#nTableBody").innerHTML = `<tr><td colspan="6" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
+      return;
+    }
+
+    const rows = r.rows || r.data || [];
+    $("#nTableBody").innerHTML = rows.length ? rows.map(x => {
+      const nombre = `${x.apellidos || ""} ${x.nombres || ""}`.trim() || x.usuario || ("#" + x.estudiante_id);
+      const inp = (k, v) => `<input class="form-control n-inp" data-e="${x.estudiante_id}" data-k="${k}" value="${escapeHtml(v ?? 0)}" />`;
+
+      const p1 = `
+        <div class="mini-grid">
+          ${inp("p1_deberes", x.p1_deberes)} ${inp("p1_prueba", x.p1_prueba)}
+          ${inp("p1_lab", x.p1_lab)} ${inp("p1_examen", x.p1_examen)}
+        </div>
+        <small class="hint">total: ${escapeHtml(x.p1_total ?? "0.00")}</small>
+      `;
+      const p2 = `
+        <div class="mini-grid">
+          ${inp("p2_deberes", x.p2_deberes)} ${inp("p2_prueba", x.p2_prueba)}
+          ${inp("p2_lab", x.p2_lab)} ${inp("p2_examen", x.p2_examen)}
+        </div>
+        <small class="hint">total: ${escapeHtml(x.p2_total ?? "0.00")}</small>
+      `;
+      const p3 = `
+        <div class="mini-grid">
+          ${inp("p3_deberes", x.p3_deberes)} ${inp("p3_prueba", x.p3_prueba)}
+          ${inp("p3_lab", x.p3_lab)} ${inp("p3_examen", x.p3_examen)}
+        </div>
+        <small class="hint">total: ${escapeHtml(x.p3_total ?? "0.00")}</small>
+      `;
+
+      return `
+        <tr>
+          <td>${escapeHtml(nombre)}<br><small class="hint">id: ${escapeHtml(x.estudiante_id)}</small></td>
+          <td>${p1}</td>
+          <td>${p2}</td>
+          <td>${p3}</td>
+          <td>${escapeHtml(x.nota_final ?? "0.00")}</td>
+          <td>${escapeHtml(x.estado ?? "REPROBADO")}</td>
+        </tr>
+      `;
+    }).join("") : `<tr><td colspan="6" class="td-center">sin estudiantes matriculados</td></tr>`;
+  }
+
+  sel.onchange = loadEstudiantes;
+  $("#btnRecargarNotas").onclick = loadEstudiantes;
+  await loadEstudiantes();
+
+  $("#btnGuardarNotas").onclick = async () => {
+    if (!canEdit) return;
+
+    const curso_id = Number(sel.value);
+    if (!curso_id) return;
+
+    const itemsMap = new Map();
+    $$("#nTableBody .n-inp").forEach(i => {
+      const eid = Number(i.dataset.e);
+      const k = i.dataset.k;
+      const v = Number(String(i.value).replace(",", "."));
+      if (!itemsMap.has(eid)) itemsMap.set(eid, { estudiante_id: eid });
+      itemsMap.get(eid)[k] = isNaN(v) ? 0 : v;
+    });
+
+    const items = Array.from(itemsMap.values());
+    const rr = await Api.guardar_notas({ curso_id, items });
+
+    setMsg(rr.ok ? "notas guardadas" : (rr.error || "error"), rr.ok);
+    if (rr.ok) await loadEstudiantes();
+  };
+}
+
+/* =========================
+   reportes
+   ========================= */
+async function viewReportes(me) {
+  if (!(hasAnyPerm(me, "reportes") || hasAnyPerm(me, "horarios"))) { location.hash="#dashboard"; return router(); }
+
+  const canHor = hasPerm(me, "horarios", "ver");
+  const canRep = hasPerm(me, "reportes", "ver");
+
+  setView(shell(me, "reportes", `
+    <div class="dashboard-container fade-in">
+      <div id="repMsg"></div>
+
+      <div class="form-container">
+        <h3>reportes</h3>
+        <div class="modal-actions" style="justify-content:flex-start; gap:10px;">
+          <button class="btn btn-primary" id="btnHorarioDoc" type="button" ${canHor ? "" : "disabled"}>horario docente</button>
+          <button class="btn btn-outline" id="btnNotasEst" type="button" ${canRep ? "" : "disabled"}>mis notas (estudiante)</button>
+        </div>
+        <small class="hint">por ahora se muestra en tabla (json). pdf lo conectamos después.</small>
+      </div>
+
+      <div class="table-container">
+        <table class="data-table">
+          <thead id="repHead"></thead>
+          <tbody id="repBody">
+            <tr><td class="td-center">selecciona un reporte</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `));
+
+  $("#btnLogout").onclick = logoutTotal;
+  startClock();
+
+  const setMsg = (t, okk=false) => { $("#repMsg").innerHTML = msgBox(okk ? "success" : "info", t); };
+
+  function setTable(headHtml, bodyHtml) {
+    $("#repHead").innerHTML = headHtml;
+    $("#repBody").innerHTML = bodyHtml;
+  }
+
+  $("#btnHorarioDoc").onclick = async () => {
+    if (!canHor) return;
+    const r = await Api.reporte_horario_docente();
+    if (!r.ok) { setMsg(r.error || "error"); return; }
+    const rows = r.rows || r.data || [];
+    setTable(`
+      <tr>
+        <th>periodo</th><th>curso</th><th>paralelo</th><th>día</th><th>hora</th><th>aula</th>
+      </tr>
+    `, rows.length ? rows.map(x => `
+      <tr>
+        <td>${escapeHtml(x.periodo)}</td>
+        <td>${escapeHtml(x.nombre)}</td>
+        <td>${escapeHtml(x.paralelo)}</td>
+        <td>${escapeHtml(diaNombre(x.dia_semana))}</td>
+        <td>${escapeHtml(x.hora_inicio)}-${escapeHtml(x.hora_fin)}</td>
+        <td>${escapeHtml(x.aula || "-")}</td>
+      </tr>
+    `).join("") : `<tr><td colspan="6" class="td-center">sin datos</td></tr>`);
+  };
+
+  $("#btnNotasEst").onclick = async () => {
+    if (!canRep) return;
+    const r = await Api.reporte_notas_estudiante();
+    if (!r.ok) { setMsg(r.error || "error"); return; }
+    const rows = r.rows || r.data || [];
+    setTable(`
+      <tr>
+        <th>periodo</th><th>curso</th><th>paralelo</th><th>p1</th><th>p2</th><th>p3</th><th>final</th><th>estado</th>
+      </tr>
+    `, rows.length ? rows.map(x => `
+      <tr>
+        <td>${escapeHtml(x.periodo)}</td>
+        <td>${escapeHtml(x.nombre)}</td>
+        <td>${escapeHtml(x.paralelo)}</td>
+        <td>${escapeHtml(x.p1_total ?? "0.00")}</td>
+        <td>${escapeHtml(x.p2_total ?? "0.00")}</td>
+        <td>${escapeHtml(x.p3_total ?? "0.00")}</td>
+        <td>${escapeHtml(x.nota_final ?? "0.00")}</td>
+        <td>${escapeHtml(x.estado ?? "-")}</td>
+      </tr>
+    `).join("") : `<tr><td colspan="8" class="td-center">sin datos</td></tr>`);
+  };
+}
+
+/* =========================
+   logout + router
+   ========================= */
 async function logoutTotal() {
   await Api.logout();
   stopClock();
   history.replaceState(null, "", location.pathname + location.search + "#login");
-  loginView(`<div class="message info">sesión cerrada</div>`);
+  loginView(msgBox("info", "sesión cerrada"));
 }
 
 async function router() {
-  const meRes = await Api.me();
   const hash = (location.hash || "#login").replace("#", "");
 
-  if (!meRes.ok) {
-    loginView();
-    return;
-  }
+  const meRes = await Api.me();
+  if (!meRes.ok) { loginView(); return; }
 
   const me = meRes.me;
 
-  if (hash === "login" || hash === "") {
-    location.hash = "#dashboard";
-    return router();
-  }
+  if (hash === "login" || hash === "") { location.hash = "#dashboard"; return; }
 
-  if (hash === "usuarios" && !hasAnyPerm(me, "usuarios")) {
-    location.hash = "#dashboard";
-    return router();
-  }
+  if (hash === "usuarios" && !hasAnyPerm(me, "usuarios")) location.hash = "#dashboard";
+  if (hash === "roles" && !hasAnyPerm(me, "roles")) location.hash = "#dashboard";
+  if (hash === "permisos" && !hasAnyPerm(me, "permisos")) location.hash = "#dashboard";
+  if (hash === "cursos" && !hasAnyPerm(me, "cursos")) location.hash = "#dashboard";
+  if (hash === "matriculas" && !hasAnyPerm(me, "matriculas")) location.hash = "#dashboard";
+  if (hash === "notas" && !hasAnyPerm(me, "notas")) location.hash = "#dashboard";
+  if (hash === "reportes" && !(hasAnyPerm(me, "reportes") || hasAnyPerm(me, "horarios"))) location.hash = "#dashboard";
 
-  if (hash === "roles" && !hasAnyPerm(me, "roles")) {
-    location.hash = "#dashboard";
-    return router();
-  }
+  const h = (location.hash || "#dashboard").replace("#", "");
 
-  if (hash === "permisos" && !hasAnyPerm(me, "permisos")) {
-    location.hash = "#dashboard";
-    return router();
-  }
-
-  if (hash === "dashboard") return viewDashboard(me);
-  if (hash === "usuarios") return viewUsuarios(me);
-  if (hash === "roles") return viewRoles(me);
-  if (hash === "permisos") return viewPermisos(me);
+  if (h === "dashboard") return viewDashboard(me);
+  if (h === "usuarios") return viewUsuarios(me);
+  if (h === "roles") return viewRoles(me);
+  if (h === "permisos") return viewPermisos(me);
+  if (h === "cursos") return viewCursos(me);
+  if (h === "matriculas") return viewMatriculas(me);
+  if (h === "notas") return viewNotas(me);
+  if (h === "reportes") return viewReportes(me);
 
   location.hash = "#dashboard";
-  return router();
+  return viewDashboard(me);
 }
 
 document.addEventListener("DOMContentLoaded", () => {
