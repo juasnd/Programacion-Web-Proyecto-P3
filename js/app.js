@@ -3,8 +3,6 @@ function $(sel) { return document.querySelector(sel); }
 function $$(sel) { return document.querySelectorAll(sel); }
 
 let clockTimer = null;
-
-// cache simple para no golpear el API a cada rato
 let USERS_CACHE = { loaded: false, data: [], at: 0 };
 
 function ensureApp() {
@@ -149,9 +147,21 @@ function renderPager(containerSel, page, totalPages, onGo) {
    usuarios helper (para selects de estudiantes/docentes)
    ========================= */
 
-// intenta detectar "docente/estudiante" por rol_nombre
+function getRoleText(u) {
+  return String(
+    u?.rol_nombre ??
+    u?.rol ??
+    u?.role ??
+    u?.rolName ??
+    u?.rolNombre ??
+    ""
+  ).toLowerCase().trim();
+}
+
 function roleKind(u) {
-  const r = String(u?.rol_nombre || "").toLowerCase();
+  const r = getRoleText(u);
+  if (r === "docente") return "docente";
+  if (r === "estudiante") return "estudiante";
   if (r.includes("docente") || r.includes("prof")) return "docente";
   if (r.includes("estudiante") || r.includes("alumno")) return "estudiante";
   return "";
@@ -159,14 +169,15 @@ function roleKind(u) {
 
 async function ensureUsersCache(force = false) {
   const now = Date.now();
-  const ttlMs = 60_000; // 1 min
+  const ttlMs = 60_000;
   if (!force && USERS_CACHE.loaded && (now - USERS_CACHE.at) < ttlMs) return USERS_CACHE.data;
 
   const r = await Api.usuarios_list();
-  if (!r.ok) return null;
+  if (!r || !r.ok) return null;
 
+  const arr = Array.isArray(r.data) ? r.data : (Array.isArray(r.rows) ? r.rows : []);
   USERS_CACHE.loaded = true;
-  USERS_CACHE.data = Array.isArray(r.data) ? r.data : [];
+  USERS_CACHE.data = arr;
   USERS_CACHE.at = now;
   return USERS_CACHE.data;
 }
@@ -174,7 +185,8 @@ async function ensureUsersCache(force = false) {
 function userLabel(u) {
   const nombre = `${u.apellidos || ""} ${u.nombres || ""}`.trim();
   const ced = u.cedula ? ` • ${u.cedula}` : "";
-  const rol = u.rol_nombre ? ` • ${u.rol_nombre}` : "";
+  const rolTxt = getRoleText(u);
+  const rol = rolTxt ? ` • ${rolTxt}` : "";
   return `${nombre || u.usuario || ("#" + u.id)}${ced}${rol}`;
 }
 
@@ -190,9 +202,132 @@ function bindCedulaPicker(inputEl, users, onPick) {
   if (!inputEl) return;
   inputEl.addEventListener("input", () => {
     const ced = onlyDigits(inputEl.value);
+    inputEl.value = ced;
     if (ced.length < 10) return;
     const hit = (users || []).find(u => String(u.cedula || "") === ced);
     if (hit) onPick(hit);
+  });
+}
+
+/* =========================
+   MODALS (sin alert/prompt/confirm)
+   ========================= */
+
+function openModal({ title = "", bodyHtml = "", okText = "", cancelText = "cerrar", danger = false, onOk = null, onOpen = null } = {}) {
+  const id = "m_" + Math.random().toString(16).slice(2);
+  const html = `
+    <div class="modal-overlay" id="${id}" role="dialog" aria-modal="true">
+      <div class="modal-content">
+        <button class="modal-close" type="button" data-close aria-label="cerrar">&times;</button>
+        ${title ? `<div class="modal-header"><h3>${escapeHtml(title)}</h3></div>` : ``}
+        <div class="modal-body">${bodyHtml}</div>
+        <div class="modal-actions">
+          ${cancelText ? `<button class="btn btn-outline" type="button" data-cancel>${escapeHtml(cancelText)}</button>` : ``}
+          ${okText ? `<button class="btn ${danger ? "btn-danger" : "btn-primary"}" type="button" data-ok>${escapeHtml(okText)}</button>` : ``}
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.insertAdjacentHTML("beforeend", html);
+
+  const root = document.getElementById(id);
+  const close = () => root?.remove();
+
+  const closeBtns = root.querySelectorAll("[data-close],[data-cancel]");
+  closeBtns.forEach(b => (b.onclick = close));
+
+  const esc = (e) => { if (e.key === "Escape") { close(); document.removeEventListener("keydown", esc); } };
+  document.addEventListener("keydown", esc);
+
+  const okBtn = root.querySelector("[data-ok]");
+  if (okBtn && onOk) okBtn.onclick = onOk;
+
+  if (onOpen) onOpen(root, close);
+
+  return { root, close, id };
+}
+
+function confirmModal({ title = "confirmar", message = "¿continuar?", okText = "sí", cancelText = "no", danger = false } = {}) {
+  return new Promise((resolve) => {
+    openModal({
+      title,
+      bodyHtml: `<div class="message info">${escapeHtml(message)}</div>`,
+      okText,
+      cancelText,
+      danger,
+      onOk: () => { resolve(true); m.close(); },
+      onOpen: (root, close) => { /* noop */ },
+    });
+    const m = document.querySelector(".modal-overlay:last-of-type");
+    const close = () => { resolve(false); m?.remove(); };
+    m?.querySelectorAll("[data-close],[data-cancel]").forEach(b => (b.onclick = close));
+    const ok = m?.querySelector("[data-ok]");
+    if (ok) ok.onclick = () => { resolve(true); m?.remove(); };
+  });
+}
+
+function formModal({ title = "editar", fields = [], okText = "guardar", cancelText = "cancelar", danger = false } = {}) {
+  // fields: [{name,label,type,placeholder,value,options,disabled,help,required}]
+  return new Promise((resolve) => {
+    const body = `
+      <div id="fm_err"></div>
+      <div class="form-grid">
+        ${fields.map(f => {
+          const name = escapeHtml(f.name);
+          const label = escapeHtml(f.label || f.name);
+          const help = f.help ? `<small class="hint">${escapeHtml(f.help)}</small>` : "";
+          const req = f.required ? " *" : "";
+          const dis = f.disabled ? "disabled" : "";
+          const val = f.value ?? "";
+          if (f.type === "select") {
+            const opts = (f.options || []).map(o => {
+              const v = String(o.value ?? "");
+              const t = String(o.text ?? "");
+              const sel = String(val) === v ? "selected" : "";
+              return `<option value="${escapeHtml(v)}" ${sel}>${escapeHtml(t)}</option>`;
+            }).join("");
+            return `
+              <div class="form-group">
+                <label>${label}${req}</label>
+                <select class="form-control select" data-f="${name}" ${dis}>${opts}</select>
+                ${help}
+              </div>
+            `;
+          }
+          const type = escapeHtml(f.type || "text");
+          const ph = escapeHtml(f.placeholder || "");
+          return `
+            <div class="form-group">
+              <label>${label}${req}</label>
+              <input class="form-control" type="${type}" data-f="${name}" placeholder="${ph}" value="${escapeHtml(val)}" ${dis} />
+              ${help}
+            </div>
+          `;
+        }).join("")}
+      </div>
+    `;
+
+    let modalRoot = null;
+    const m = openModal({
+      title,
+      bodyHtml: body,
+      okText,
+      cancelText,
+      danger,
+      onOpen: (root, close) => { modalRoot = root; },
+      onOk: () => {
+        const out = {};
+        fields.forEach(f => {
+          const el = modalRoot.querySelector(`[data-f="${CSS.escape(f.name)}"]`);
+          out[f.name] = el ? el.value : "";
+        });
+        resolve(out);
+        modalRoot?.remove();
+      }
+    });
+
+    const close = () => { resolve(null); m.close(); };
+    m.root.querySelectorAll("[data-close],[data-cancel]").forEach(b => (b.onclick = close));
   });
 }
 
@@ -213,7 +348,7 @@ function shell(me, active, contentHtml) {
   ` : "";
 
   const avatarChar = escapeHtml(((me?.nombres || me?.usuario || "u")[0] || "u").toUpperCase());
-  const rolName = escapeHtml(me?.rol_nombre || "sin rol");
+  const rolName = escapeHtml(me?.rol_nombre || me?.rol || "sin rol");
   const nombreMostrado = escapeHtml(me?.usuario || "");
 
   return `
@@ -305,7 +440,6 @@ function loginView(msg = "") {
    ========================= */
 async function viewDashboard(me) {
   const cards = [];
-
   const pushCard = (cond, href, title, desc) => {
     if (!cond) return;
     cards.push(`
@@ -342,7 +476,7 @@ async function viewDashboard(me) {
 }
 
 /* =========================
-   usuarios (sin cambios grandes aquí)
+   usuarios
    ========================= */
 function showEditUserModal(me, user, roles, onSave) {
   const edadIni = calcEdad(user.fecha_nacimiento);
@@ -362,7 +496,7 @@ function showEditUserModal(me, user, roles, onSave) {
   ` : `
     <div class="form-group">
       <label>rol</label>
-      <input class="form-control" value="${escapeHtml(user.rol_nombre || "(sin rol)")}" disabled />
+      <input class="form-control" value="${escapeHtml(user.rol_nombre || user.rol || "(sin rol)")}" disabled />
     </div>
   `;
 
@@ -370,9 +504,9 @@ function showEditUserModal(me, user, roles, onSave) {
     <div class="modal-overlay" id="editModal" role="dialog" aria-modal="true">
       <div class="modal-content">
         <button class="modal-close" id="closeModal" type="button" aria-label="cerrar">&times;</button>
-        <div class="modal-header">
-          <h3>editar usuario</h3>
-        </div>
+        <div class="modal-header"><h3>editar usuario</h3></div>
+
+        <div id="editErr"></div>
 
         <div class="form-grid">
           <div class="form-group">
@@ -427,6 +561,7 @@ function showEditUserModal(me, user, roles, onSave) {
 
   document.body.insertAdjacentHTML("beforeend", modalHtml);
 
+  const setErr = (t) => { $("#editErr").innerHTML = msgBox("info", t); };
   const close = () => $("#editModal")?.remove();
   $("#closeModal").onclick = close;
   $("#cancelEdit").onclick = close;
@@ -437,7 +572,7 @@ function showEditUserModal(me, user, roles, onSave) {
   });
 
   $("#saveEdit").onclick = async () => {
-    if (!hasPerm(me, "usuarios", "editar")) { alert("sin permiso para editar"); return; }
+    if (!hasPerm(me, "usuarios", "editar")) { setErr("sin permiso para editar"); return; }
 
     const usuario = $("#edit_usuario").value.trim().toLowerCase();
     const nombres = $("#edit_nombres").value.trim();
@@ -447,12 +582,12 @@ function showEditUserModal(me, user, roles, onSave) {
     const activo = Number($("#edit_activo").value);
     const password = $("#edit_password").value.trim();
 
-    if (!usuario || !nombres || !apellidos || !cedula || !fecha_nacimiento) { alert("complete los campos"); return; }
-    if (cedula.length !== 10) { alert("la cédula debe tener 10 dígitos"); return; }
+    if (!usuario || !nombres || !apellidos || !cedula || !fecha_nacimiento) { setErr("complete los campos"); return; }
+    if (cedula.length !== 10) { setErr("la cédula debe tener 10 dígitos"); return; }
 
     const edad = calcEdad(fecha_nacimiento);
-    if (edad === null) { alert("fecha de nacimiento inválida"); return; }
-    if (edad < 18) { alert("solo mayores de edad (18+)"); return; }
+    if (edad === null) { setErr("fecha de nacimiento inválida"); return; }
+    if (edad < 18) { setErr("solo mayores de edad (18+)"); return; }
 
     const data = { id: Number(user.id), usuario, nombres, apellidos, cedula, fecha_nacimiento, activo };
 
@@ -462,18 +597,19 @@ function showEditUserModal(me, user, roles, onSave) {
     }
 
     if (password) {
-      if (password.length < 8) { alert("la contraseña debe tener al menos 8 caracteres"); return; }
+      if (password.length < 8) { setErr("la contraseña debe tener al menos 8 caracteres"); return; }
       data.password = password;
     }
 
     const r = await Api.usuarios_update(data);
     if (r.ok) { close(); onSave(); }
-    else alert("error: " + (r.error || "error"));
+    else setErr("error: " + (r.error || "error"));
   };
 
-  document.addEventListener("keydown", function escClose(e) {
+  const escClose = (e) => {
     if (e.key === "Escape") { close(); document.removeEventListener("keydown", escClose); }
-  });
+  };
+  document.addEventListener("keydown", escClose);
 }
 
 async function viewUsuarios(me) {
@@ -495,36 +631,16 @@ async function viewUsuarios(me) {
       <div class="form-container">
         <h3>crear usuario</h3>
         <div class="form-grid">
-          <div class="form-group">
-            <label>usuario</label>
-            <input id="u_usuario" class="form-control" placeholder="ej: juan.perez" />
-          </div>
-
-          <div class="form-group">
-            <label>nombres</label>
-            <input id="u_nombres" class="form-control" placeholder="juan felipe" />
-          </div>
-
-          <div class="form-group">
-            <label>apellidos</label>
-            <input id="u_apellidos" class="form-control" placeholder="gutierrez vargas" />
-          </div>
-
-          <div class="form-group">
-            <label>cédula</label>
-            <input id="u_cedula" class="form-control" placeholder="10 dígitos" maxlength="10" />
-          </div>
-
+          <div class="form-group"><label>usuario</label><input id="u_usuario" class="form-control" placeholder="ej: juan.perez" /></div>
+          <div class="form-group"><label>nombres</label><input id="u_nombres" class="form-control" placeholder="juan felipe" /></div>
+          <div class="form-group"><label>apellidos</label><input id="u_apellidos" class="form-control" placeholder="gutierrez vargas" /></div>
+          <div class="form-group"><label>cédula</label><input id="u_cedula" class="form-control" placeholder="10 dígitos" maxlength="10" /></div>
           <div class="form-group">
             <label>fecha de nacimiento</label>
             <input id="u_fnac" class="form-control" type="date" />
             <small class="hint" id="u_edad_hint"></small>
           </div>
-
-          <div class="form-group">
-            <label>contraseña</label>
-            <input id="u_pass" class="form-control" type="password" placeholder="mínimo 8 caracteres" />
-          </div>
+          <div class="form-group"><label>contraseña</label><input id="u_pass" class="form-control" type="password" placeholder="mínimo 8 caracteres" /></div>
 
           ${me.is_admin ? `
           <div class="form-group">
@@ -545,20 +661,10 @@ async function viewUsuarios(me) {
         <table class="data-table">
           <thead>
             <tr>
-              <th>id</th>
-              <th>usuario</th>
-              <th>nombres</th>
-              <th>apellidos</th>
-              <th>cédula</th>
-              <th>edad</th>
-              <th>rol</th>
-              <th>estado</th>
-              <th>acciones</th>
+              <th>id</th><th>usuario</th><th>nombres</th><th>apellidos</th><th>cédula</th><th>edad</th><th>rol</th><th>estado</th><th>acciones</th>
             </tr>
           </thead>
-          <tbody id="uTableBody">
-            <tr><td colspan="9" class="td-center">cargando...</td></tr>
-          </tbody>
+          <tbody id="uTableBody"><tr><td colspan="9" class="td-center">cargando...</td></tr></tbody>
         </table>
       </div>
       <div id="uPager" class="pager-wrap"></div>
@@ -616,7 +722,7 @@ async function viewUsuarios(me) {
         if (h) h.textContent = "";
         $("#u_pass").value = "";
         if ($("#u_rol")) $("#u_rol").value = "";
-        USERS_CACHE.loaded = false; // refrescar cache
+        USERS_CACHE.loaded = false;
         if (canList) cargarUsuarios();
       }
     };
@@ -643,7 +749,7 @@ async function viewUsuarios(me) {
           <td>${escapeHtml(u.apellidos || "")}</td>
           <td>${escapeHtml(u.cedula || "")}</td>
           <td>${edad === null ? "-" : edad}</td>
-          <td>${escapeHtml(u.rol_nombre || "(sin rol)")}</td>
+          <td>${escapeHtml(u.rol_nombre || u.rol || "(sin rol)")}</td>
           <td>
             <span class="status-badge ${Number(u.activo) ? "status-active" : "status-inactive"}">
               ${Number(u.activo) ? "activo" : "inactivo"}
@@ -663,8 +769,15 @@ async function viewUsuarios(me) {
       if (b.disabled) return;
       b.onclick = async () => {
         if (!canDelete) return msg("sin permiso para eliminar");
-        if (!confirm("desactivar usuario?")) return;
         const id = Number(b.dataset.del);
+        const okk = await confirmModal({
+          title: "desactivar usuario",
+          message: `¿desactivar el usuario #${id}?`,
+          okText: "desactivar",
+          cancelText: "cancelar",
+          danger: true
+        });
+        if (!okk) return;
         const rr = await Api.usuarios_delete({ id });
         msg(rr.ok ? "usuario desactivado" : (rr.error || "error"));
         if (rr.ok) { USERS_CACHE.loaded = false; cargarUsuarios(); }
@@ -698,7 +811,7 @@ async function viewUsuarios(me) {
       return;
     }
 
-    usersData = Array.isArray(r.data) ? r.data : [];
+    usersData = Array.isArray(r.data) ? r.data : (Array.isArray(r.rows) ? r.rows : []);
     if (usersData.length === 0) {
       $("#uTableBody").innerHTML = `<tr><td colspan="9" class="td-center">sin usuarios</td></tr>`;
       $("#uPager").innerHTML = "";
@@ -728,14 +841,8 @@ async function viewRoles(me) {
       <div class="form-container">
         <h3>crear rol</h3>
         <div class="form-grid">
-          <div class="form-group">
-            <label>nombre</label>
-            <input id="r_nombre" class="form-control" placeholder="ej: supervisor" />
-          </div>
-          <div class="form-group">
-            <label>descripción</label>
-            <input id="r_desc" class="form-control" placeholder="opcional" />
-          </div>
+          <div class="form-group"><label>nombre</label><input id="r_nombre" class="form-control" placeholder="ej: supervisor" /></div>
+          <div class="form-group"><label>descripción</label><input id="r_desc" class="form-control" placeholder="opcional" /></div>
         </div>
         <button class="btn btn-primary" id="btnCrearR" type="button">crear</button>
       </div>
@@ -744,18 +851,8 @@ async function viewRoles(me) {
       ${canList ? `
       <div class="table-container">
         <table class="data-table">
-          <thead>
-            <tr>
-              <th>id</th>
-              <th>nombre</th>
-              <th>descripción</th>
-              <th>tipo</th>
-              <th>acciones</th>
-            </tr>
-          </thead>
-          <tbody id="rTableBody">
-            <tr><td colspan="5" class="td-center">cargando...</td></tr>
-          </tbody>
+          <thead><tr><th>id</th><th>nombre</th><th>descripción</th><th>tipo</th><th>acciones</th></tr></thead>
+          <tbody id="rTableBody"><tr><td colspan="5" class="td-center">cargando...</td></tr></tbody>
         </table>
       </div>
       <div id="rPager" class="pager-wrap"></div>
@@ -810,10 +907,17 @@ async function viewRoles(me) {
       b.onclick = async () => {
         const id = Number(b.dataset.edit);
         const current = rolesData.find(z => Number(z.id) === id);
-        const desc = prompt("nueva descripción:", current?.descripcion || "");
-        if (desc === null) return;
+        const res = await formModal({
+          title: `editar rol #${id}`,
+          okText: "guardar",
+          cancelText: "cancelar",
+          fields: [
+            { name: "descripcion", label: "descripción", type: "text", value: current?.descripcion || "", placeholder: "opcional" }
+          ]
+        });
+        if (!res) return;
 
-        const rr = await Api.roles_update({ id, descripcion: desc.trim() });
+        const rr = await Api.roles_update({ id, descripcion: String(res.descripcion || "").trim() });
         msg(rr.ok ? "actualizado" : (rr.error || "error"));
         if (rr.ok) cargarRoles();
       };
@@ -835,7 +939,7 @@ async function viewRoles(me) {
       return;
     }
 
-    rolesData = Array.isArray(r.data) ? r.data : [];
+    rolesData = Array.isArray(r.data) ? r.data : (Array.isArray(r.rows) ? r.rows : []);
     if (rolesData.length === 0) {
       $("#rTableBody").innerHTML = `<tr><td colspan="5" class="td-center">sin roles</td></tr>`;
       $("#rPager").innerHTML = "";
@@ -1004,7 +1108,7 @@ async function viewPermisos(me) {
 }
 
 /* =========================
-   cursos (MEJORADO: asignar docente por select + cédula)
+   cursos (sin prompt/confirm)
    ========================= */
 async function viewCursos(me) {
   if (!hasAnyPerm(me, "cursos")) { location.hash="#dashboard"; return router(); }
@@ -1021,29 +1125,17 @@ async function viewCursos(me) {
       <div class="form-container">
         <h3>crear curso</h3>
         <div class="form-grid">
-          <div class="form-group">
-            <label>nombre</label>
-            <input id="c_nombre" class="form-control" placeholder="ej: matemáticas" />
-          </div>
-          <div class="form-group">
-            <label>paralelo</label>
-            <input id="c_paralelo" class="form-control" value="A" />
-          </div>
-          <div class="form-group">
-            <label>periodo</label>
-            <input id="c_periodo" class="form-control" placeholder="ej: 2026-1" />
-          </div>
+          <div class="form-group"><label>nombre</label><input id="c_nombre" class="form-control" placeholder="ej: matemáticas" /></div>
+          <div class="form-group"><label>paralelo</label><input id="c_paralelo" class="form-control" value="A" /></div>
+          <div class="form-group"><label>periodo</label><input id="c_periodo" class="form-control" placeholder="ej: 2026-1" /></div>
 
           <div class="form-group">
             <label>docente (opcional)</label>
             <select id="c_docente_sel" class="form-control select"></select>
-            <small class="hint">puedes buscar por cédula abajo.</small>
+            <small class="hint">solo aparecen usuarios con rol docente.</small>
           </div>
 
-          <div class="form-group">
-            <label>cédula del docente (opcional)</label>
-            <input id="c_docente_ced" class="form-control" placeholder="10 dígitos" maxlength="10" />
-          </div>
+          <div class="form-group"><label>cédula del docente (opcional)</label><input id="c_docente_ced" class="form-control" placeholder="10 dígitos" maxlength="10" /></div>
 
           <div class="form-group">
             <label>día</label>
@@ -1053,18 +1145,9 @@ async function viewCursos(me) {
               <option value="7">domingo</option>
             </select>
           </div>
-          <div class="form-group">
-            <label>hora inicio</label>
-            <input id="c_hi" class="form-control" value="07:00" />
-          </div>
-          <div class="form-group">
-            <label>hora fin</label>
-            <input id="c_hf" class="form-control" value="08:00" />
-          </div>
-          <div class="form-group">
-            <label>aula</label>
-            <input id="c_aula" class="form-control" placeholder="ej: B-203" />
-          </div>
+          <div class="form-group"><label>hora inicio</label><input id="c_hi" class="form-control" value="07:00" /></div>
+          <div class="form-group"><label>hora fin</label><input id="c_hf" class="form-control" value="08:00" /></div>
+          <div class="form-group"><label>aula</label><input id="c_aula" class="form-control" placeholder="ej: B-203" /></div>
         </div>
 
         <div class="modal-actions" style="justify-content:flex-start; gap:10px;">
@@ -1078,19 +1161,10 @@ async function viewCursos(me) {
         <table class="data-table">
           <thead>
             <tr>
-              <th>id</th>
-              <th>curso</th>
-              <th>paralelo</th>
-              <th>periodo</th>
-              <th>docente</th>
-              <th>horario</th>
-              <th>aula</th>
-              <th>acciones</th>
+              <th>id</th><th>curso</th><th>paralelo</th><th>periodo</th><th>docente</th><th>horario</th><th>aula</th><th>acciones</th>
             </tr>
           </thead>
-          <tbody id="cTableBody">
-            <tr><td colspan="8" class="td-center">cargando...</td></tr>
-          </tbody>
+          <tbody id="cTableBody"><tr><td colspan="8" class="td-center">cargando...</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -1101,17 +1175,66 @@ async function viewCursos(me) {
 
   const setMsg = (t, okk=false) => { $("#cMsg").innerHTML = msgBox(okk ? "success" : "info", t); };
 
-  // cargar docentes para el select
   let docentes = [];
   async function loadDocentes(force=false) {
     const all = await ensureUsersCache(force);
     if (!all) { setMsg("no se pudo cargar usuarios para docentes"); return; }
-    // preferimos rol docente; si no hay, mostramos todos para no bloquear
+
     docentes = all.filter(u => roleKind(u) === "docente" && Number(u.activo) === 1);
-    if (docentes.length === 0) docentes = all.filter(u => Number(u.activo) === 1);
+
+    if (docentes.length === 0) {
+      fillUserSelect($("#c_docente_sel"), [], "no hay docentes");
+      setMsg("no hay usuarios con rol docente. crea/asigna rol docente a un usuario.", false);
+      return;
+    }
 
     fillUserSelect($("#c_docente_sel"), docentes, "sin docente");
     bindCedulaPicker($("#c_docente_ced"), docentes, (u) => { $("#c_docente_sel").value = String(u.id); });
+  }
+
+  async function openEditCursoModal(row) {
+    const docenteOptions = [{ value: "", text: "sin docente" }].concat(
+      docentes.map(d => ({ value: String(d.id), text: userLabel(d) }))
+    );
+
+    const res = await formModal({
+      title: `editar curso #${row.id}`,
+      okText: "guardar",
+      cancelText: "cancelar",
+      fields: [
+        { name: "nombre", label: "nombre", type: "text", value: row.nombre, required: true },
+        { name: "paralelo", label: "paralelo", type: "text", value: row.paralelo || "A", required: true },
+        { name: "periodo", label: "periodo", type: "text", value: row.periodo, required: true },
+        { name: "docente_id", label: "docente (opcional)", type: "select", value: row.docente_id ?? "", options: docenteOptions },
+        { name: "dia_semana", label: "día (1=lun..7=dom)", type: "number", value: row.dia_semana ?? 1, required: true },
+        { name: "hora_inicio", label: "hora inicio (HH:MM)", type: "text", value: row.hora_inicio || "07:00", required: true },
+        { name: "hora_fin", label: "hora fin (HH:MM)", type: "text", value: row.hora_fin || "08:00", required: true },
+        { name: "aula", label: "aula", type: "text", value: row.aula ?? "" },
+      ]
+    });
+    if (!res) return null;
+
+    const nombre = String(res.nombre || "").trim();
+    const paralelo = String(res.paralelo || "").trim();
+    const periodo = String(res.periodo || "").trim();
+    const docente_id = String(res.docente_id || "").trim();
+    const dia_semana = Number(res.dia_semana);
+    const hora_inicio = String(res.hora_inicio || "").trim();
+    const hora_fin = String(res.hora_fin || "").trim();
+    const aula = String(res.aula || "").trim();
+
+    if (!nombre || !paralelo || !periodo) { setMsg("complete nombre/paralelo/periodo"); return null; }
+    if (!(dia_semana >= 1 && dia_semana <= 7)) { setMsg("día inválido"); return null; }
+    if (!/^\d{2}:\d{2}$/.test(hora_inicio) || !/^\d{2}:\d{2}$/.test(hora_fin)) { setMsg("hora inválida (HH:MM)"); return null; }
+
+    return {
+      id: Number(row.id),
+      nombre, paralelo, periodo,
+      docente_id: (docente_id === "" ? "" : Number(docente_id)),
+      dia_semana,
+      hora_inicio, hora_fin,
+      aula
+    };
   }
 
   async function loadCursos() {
@@ -1145,7 +1268,14 @@ async function viewCursos(me) {
     $$("#cTableBody [data-del]").forEach(b => {
       b.onclick = async () => {
         const id = Number(b.dataset.del);
-        if (!confirm("desactivar curso #" + id + "?")) return;
+        const okk = await confirmModal({
+          title: "desactivar curso",
+          message: `¿desactivar el curso #${id}?`,
+          okText: "desactivar",
+          cancelText: "cancelar",
+          danger: true
+        });
+        if (!okk) return;
         const rr = await Api.cursos_delete({ id });
         setMsg(rr.ok ? "curso desactivado" : (rr.error || "error"), rr.ok);
         if (rr.ok) loadCursos();
@@ -1157,32 +1287,13 @@ async function viewCursos(me) {
         const id = Number(b.dataset.edit);
         const row = rows.find(z => Number(z.id) === id);
         if (!row) return;
+        // asegurar docentes para select
+        if (!docentes.length) await loadDocentes(false);
 
-        // editar básico por prompts (incluye docente_id)
-        const nombre = prompt("nombre:", row.nombre); if (nombre === null) return;
-        const paralelo = prompt("paralelo:", row.paralelo); if (paralelo === null) return;
-        const periodo = prompt("periodo:", row.periodo); if (periodo === null) return;
+        const payload = await openEditCursoModal(row);
+        if (!payload) return;
 
-        // aquí mejor: permite poner docente_id directamente o dejar vacío
-        const docente_id = prompt("docente_id (vacío = sin docente):", row.docente_id ?? ""); if (docente_id === null) return;
-
-        const dia_semana = prompt("día (1=lun..7=dom):", row.dia_semana); if (dia_semana === null) return;
-        const hora_inicio = prompt("hora inicio (HH:MM):", row.hora_inicio); if (hora_inicio === null) return;
-        const hora_fin = prompt("hora fin (HH:MM):", row.hora_fin); if (hora_fin === null) return;
-        const aula = prompt("aula:", row.aula ?? ""); if (aula === null) return;
-
-        const rr = await Api.cursos_update({
-          id,
-          nombre: nombre.trim(),
-          paralelo: paralelo.trim(),
-          periodo: periodo.trim(),
-          docente_id: (docente_id.trim() === "" ? "" : Number(docente_id)),
-          dia_semana: Number(dia_semana),
-          hora_inicio: hora_inicio.trim(),
-          hora_fin: hora_fin.trim(),
-          aula: aula.trim()
-        });
-
+        const rr = await Api.cursos_update(payload);
         setMsg(rr.ok ? "curso actualizado" : (rr.error || "error"), rr.ok);
         if (rr.ok) loadCursos();
       };
@@ -1212,6 +1323,7 @@ async function viewCursos(me) {
       const aula = $("#c_aula").value.trim();
 
       if (!nombre || !periodo) { setMsg("complete nombre y periodo"); return; }
+      if (!/^\d{2}:\d{2}$/.test(hora_inicio) || !/^\d{2}:\d{2}$/.test(hora_fin)) { setMsg("hora inválida (HH:MM)"); return; }
 
       const payload = { nombre, paralelo, periodo, dia_semana, hora_inicio, hora_fin, aula };
       if (docenteSel !== "") payload.docente_id = Number(docenteSel);
@@ -1231,7 +1343,7 @@ async function viewCursos(me) {
 }
 
 /* =========================
-   matriculación (MEJORADO: select estudiante + búsqueda por cédula)
+   matriculación
    ========================= */
 async function viewMatriculas(me) {
   if (!hasAnyPerm(me, "matriculas")) { location.hash="#dashboard"; return router(); }
@@ -1250,7 +1362,7 @@ async function viewMatriculas(me) {
           <div class="form-group" style="grid-column: 1 / -1;">
             <label>estudiante</label>
             <select id="m_est_sel" class="form-control select"></select>
-            <small class="hint">elige de la lista o busca por cédula abajo.</small>
+            <small class="hint">solo aparecen usuarios con rol estudiante. busca por cédula abajo.</small>
           </div>
 
           <div class="form-group">
@@ -1280,7 +1392,6 @@ async function viewMatriculas(me) {
 
   const setMsg = (t, okk=false) => { $("#mMsg").innerHTML = msgBox(okk ? "success" : "info", t); };
 
-  // cursos
   const r = await Api.cursos_list();
   const cursos = (r.ok ? (r.rows || r.data || []) : []);
   const selCurso = $("#m_curso");
@@ -1289,14 +1400,18 @@ async function viewMatriculas(me) {
     return `<option value="${c.id}">${escapeHtml(label)}</option>`;
   }).join("") || `<option value="">sin cursos</option>`;
 
-  // estudiantes
   let estudiantes = [];
   async function loadEstudiantes(force=false) {
     const all = await ensureUsersCache(force);
     if (!all) { setMsg("no se pudo cargar usuarios para estudiantes"); return; }
 
     estudiantes = all.filter(u => roleKind(u) === "estudiante" && Number(u.activo) === 1);
-    if (estudiantes.length === 0) estudiantes = all.filter(u => Number(u.activo) === 1); // fallback
+
+    if (estudiantes.length === 0) {
+      fillUserSelect($("#m_est_sel"), [], "no hay estudiantes");
+      setMsg("no hay usuarios con rol estudiante. crea/asigna rol estudiante a un usuario.", false);
+      return;
+    }
 
     fillUserSelect($("#m_est_sel"), estudiantes, "selecciona estudiante");
     bindCedulaPicker($("#m_est_ced"), estudiantes, (u) => { $("#m_est_sel").value = String(u.id); });
@@ -1314,31 +1429,25 @@ async function viewMatriculas(me) {
 
   $("#btnMatricular").onclick = async () => {
     if (!canCreate) return;
-
     const estudiante_id = getSelectedEstudianteId();
     const curso_id = Number(selCurso.value);
-
     if (!estudiante_id || !curso_id) { setMsg("elige estudiante y curso"); return; }
-
     const rr = await Api.matriculas_create({ curso_id, estudiante_id });
     setMsg(rr.ok ? "matrícula registrada" : (rr.error || "error"), rr.ok);
   };
 
   $("#btnAnular").onclick = async () => {
     if (!canAnular) return;
-
     const estudiante_id = getSelectedEstudianteId();
     const curso_id = Number(selCurso.value);
-
     if (!estudiante_id || !curso_id) { setMsg("elige estudiante y curso"); return; }
-
     const rr = await Api.matriculas_anular({ curso_id, estudiante_id });
     setMsg(rr.ok ? "matrícula anulada" : (rr.error || "error"), rr.ok);
   };
 }
 
 /* =========================
-   notas (docente)
+   notas
    ========================= */
 async function viewNotas(me) {
   if (!hasAnyPerm(me, "notas")) { location.hash="#dashboard"; return router(); }
@@ -1369,17 +1478,10 @@ async function viewNotas(me) {
         <table class="data-table">
           <thead>
             <tr>
-              <th>estudiante</th>
-              <th>p1 (4/5/4/7)</th>
-              <th>p2 (4/5/4/7)</th>
-              <th>p3 (4/5/4/7)</th>
-              <th>final</th>
-              <th>estado</th>
+              <th>estudiante</th><th>p1 (4/5/4/7)</th><th>p2 (4/5/4/7)</th><th>p3 (4/5/4/7)</th><th>final</th><th>estado</th>
             </tr>
           </thead>
-          <tbody id="nTableBody">
-            <tr><td colspan="6" class="td-center">elige un curso</td></tr>
-          </tbody>
+          <tbody id="nTableBody"><tr><td colspan="6" class="td-center">elige un curso</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -1442,9 +1544,7 @@ async function viewNotas(me) {
       return `
         <tr>
           <td>${escapeHtml(nombre)}<br><small class="hint">id: ${escapeHtml(x.estudiante_id)}</small></td>
-          <td>${p1}</td>
-          <td>${p2}</td>
-          <td>${p3}</td>
+          <td>${p1}</td><td>${p2}</td><td>${p3}</td>
           <td>${escapeHtml(x.nota_final ?? "0.00")}</td>
           <td>${escapeHtml(x.estado ?? "REPROBADO")}</td>
         </tr>
@@ -1504,9 +1604,7 @@ async function viewReportes(me) {
       <div class="table-container">
         <table class="data-table">
           <thead id="repHead"></thead>
-          <tbody id="repBody">
-            <tr><td class="td-center">selecciona un reporte</td></tr>
-          </tbody>
+          <tbody id="repBody"><tr><td class="td-center">selecciona un reporte</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -1528,9 +1626,7 @@ async function viewReportes(me) {
     if (!r.ok) { setMsg(r.error || "error"); return; }
     const rows = r.rows || r.data || [];
     setTable(`
-      <tr>
-        <th>periodo</th><th>curso</th><th>paralelo</th><th>día</th><th>hora</th><th>aula</th>
-      </tr>
+      <tr><th>periodo</th><th>curso</th><th>paralelo</th><th>día</th><th>hora</th><th>aula</th></tr>
     `, rows.length ? rows.map(x => `
       <tr>
         <td>${escapeHtml(x.periodo)}</td>
@@ -1549,9 +1645,7 @@ async function viewReportes(me) {
     if (!r.ok) { setMsg(r.error || "error"); return; }
     const rows = r.rows || r.data || [];
     setTable(`
-      <tr>
-        <th>periodo</th><th>curso</th><th>paralelo</th><th>p1</th><th>p2</th><th>p3</th><th>final</th><th>estado</th>
-      </tr>
+      <tr><th>periodo</th><th>curso</th><th>paralelo</th><th>p1</th><th>p2</th><th>p3</th><th>final</th><th>estado</th></tr>
     `, rows.length ? rows.map(x => `
       <tr>
         <td>${escapeHtml(x.periodo)}</td>

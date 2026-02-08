@@ -1,12 +1,18 @@
 <?php
-require_once __DIR__ . "/session.php";
-require_once __DIR__ . "/conexion.php";
-require_once __DIR__ . "/auditoria.php";
-require_once __DIR__ . "/auth.php";
+ini_set("display_errors","0");
+ini_set("log_errors","1");
+error_reporting(E_ALL);
 
 header("Content-Type: application/json; charset=utf-8");
 
+if (session_status() !== PHP_SESSION_ACTIVE) session_start();
+
+require_once __DIR__ . "/conexion.php";
+require_once __DIR__ . "/auth.php";
+require_once __DIR__ . "/auditoria.php";
+
 $action = $_GET["action"] ?? "";
+
 $raw = file_get_contents("php://input");
 $body = $raw ? json_decode($raw, true) : [];
 if (!is_array($body)) $body = [];
@@ -21,731 +27,805 @@ function fail($msg, $code = 400) {
   exit;
 }
 
-function only_digits($s){ return preg_replace('/\D+/', '', (string)$s); }
+set_exception_handler(function($e){
+  fail("exception: ".$e->getMessage(), 500);
+});
+set_error_handler(function($severity, $message, $file, $line){
+  throw new ErrorException($message, 0, $severity, $file, $line);
+});
 
-function validar_cedula_ec($cedula) {
-  $c = only_digits($cedula);
-  if (strlen($c) !== 10) return [false, $c, "la cédula debe tener 10 dígitos"];
-  $prov = (int)substr($c, 0, 2);
-  $tercer = (int)$c[2];
-  if ($prov < 1 || $prov > 24) return [false, $c, "provincia inválida"];
-  if ($tercer > 5) return [false, $c, "cédula inválida"];
-
-  $sum = 0;
-  for ($i=0; $i<9; $i++){
-    $v = (int)$c[$i];
-    if ($i % 2 === 0) { $v *= 2; if ($v > 9) $v -= 9; }
-    $sum += $v;
-  }
-  $decena = (int)(ceil($sum / 10) * 10);
-  $dig = ($decena - $sum) % 10;
-  $ver = (int)$c[9];
-  if ($dig !== $ver) return [false, $c, "cédula inválida"];
-  return [true, $c, ""];
+function audit_safe($accion, $tabla = null, $registro_id = null, $descripcion = "") {
+  try {
+    if (function_exists("audit")) {
+      audit($accion, $tabla, $registro_id, $descripcion);
+      return;
+    }
+    if (function_exists("auditar")) {
+      auditar($accion, $tabla, $registro_id, $descripcion);
+      return;
+    }
+  } catch (Throwable $t) {}
 }
 
-function edad_desde_fecha($fecha){
-  $f = trim((string)$fecha);
-  $dt = DateTime::createFromFormat("Y-m-d", $f);
-  if (!$dt || $dt->format("Y-m-d") !== $f) return null;
-  $hoy = new DateTime("today");
-  return $dt->diff($hoy)->y;
+function require_login() {
+  if (empty($_SESSION["usuario_id"])) fail("no autenticado", 401);
+}
+function require_active_user() {
+  require_login();
+  if (isset($_SESSION["activo"]) && (int)$_SESSION["activo"] !== 1) fail("usuario inactivo", 403);
 }
 
-function is_duplicate_error($err){
-  $e = strtolower((string)$err);
-  return str_contains($e, "duplicate") || str_contains($e, "duplic");
-}
-
-function dup_field($err){
-  $e = strtolower((string)$err);
-  if (str_contains($e, "cedula") || str_contains($e, "ux_usuarios_cedula")) return "cedula";
-  if (str_contains($e, "usuario")) return "usuario";
-  if (str_contains($e, "roles_nombre") || str_contains($e, "ux_roles_nombre")) return "rol";
-  return "unknown";
-}
-
-function load_me(){
+function load_me() {
   global $enlace;
   if (empty($_SESSION["usuario_id"])) return null;
+  $uid = (int)$_SESSION["usuario_id"];
 
-  $id = (int)$_SESSION["usuario_id"];
-  $stmt = mysqli_prepare($enlace, "
-    SELECT u.id, u.usuario, u.nombres, u.apellidos, u.cedula, u.fecha_nacimiento, u.activo, u.rol_id,
-           COALESCE(r.nombre,'') AS rol_nombre
-    FROM usuarios u
-    LEFT JOIN roles r ON r.id=u.rol_id
-    WHERE u.id=? LIMIT 1
-  ");
-  if (!$stmt) return null;
+  $sql = "SELECT u.id,u.usuario,u.nombres,u.apellidos,u.cedula,u.fecha_nacimiento,u.activo,
+                 r.id AS rol_id, r.nombre AS rol, r.descripcion AS rol_desc
+          FROM usuarios u
+          LEFT JOIN roles r ON r.id=u.rol_id
+          WHERE u.id=? LIMIT 1";
+  $st = mysqli_prepare($enlace, $sql);
+  mysqli_stmt_bind_param($st, "i", $uid);
+  mysqli_stmt_execute($st);
+  $rs = mysqli_stmt_get_result($st);
+  $me = mysqli_fetch_assoc($rs) ?: null;
+  mysqli_stmt_close($st);
+  if (!$me) return null;
 
-  mysqli_stmt_bind_param($stmt, "i", $id);
-  mysqli_stmt_execute($stmt);
-  $res = mysqli_stmt_get_result($stmt);
-  $me = $res ? mysqli_fetch_assoc($res) : null;
-  mysqli_stmt_close($stmt);
-
-  if (!$me || (int)$me["activo"] !== 1) {
-    $_SESSION = [];
-    session_destroy();
-    return null;
+  $perms = [];
+  if (!empty($me["rol_id"])) {
+    $rid = (int)$me["rol_id"];
+    $sqlp = "SELECT p.modulo,p.accion
+             FROM rol_permisos rp
+             JOIN permisos p ON p.id=rp.permiso_id
+             WHERE rp.rol_id=?";
+    $sp = mysqli_prepare($enlace, $sqlp);
+    mysqli_stmt_bind_param($sp, "i", $rid);
+    mysqli_stmt_execute($sp);
+    $rp = mysqli_stmt_get_result($sp);
+    while ($row = mysqli_fetch_assoc($rp)) {
+      $perms[] = $row["modulo"]."/".$row["accion"];
+    }
+    mysqli_stmt_close($sp);
   }
+
+  $me["perms"] = $perms;
   return $me;
 }
 
-function resp_me($me){
-  $rolId = $me["rol_id"] === null ? 0 : (int)$me["rol_id"];
-  $_SESSION["rol_id"] = $rolId;
-  $_SESSION["rol_nombre"] = (string)($me["rol_nombre"] ?? "");
-
-  if ($rolId <= 0) {
-    $_SESSION["perms"] = [];
-  } else {
-    $_SESSION["perms"] = perms_user();
-    if (!is_array($_SESSION["perms"])) $_SESSION["perms"] = [];
-  }
-
-  ok(["me" => [
-    "id" => (int)$me["id"],
-    "usuario" => (string)$me["usuario"],
-    "nombres" => (string)($me["nombres"] ?? ""),
-    "apellidos" => (string)($me["apellidos"] ?? ""),
-    "cedula" => (string)($me["cedula"] ?? ""),
-    "fecha_nacimiento" => $me["fecha_nacimiento"] ?? null,
-    "rol_id" => $rolId,
-    "rol_nombre" => $_SESSION["rol_nombre"],
-    "is_admin" => is_admin(),
-    "perms" => $_SESSION["perms"]
-  ]]);
+function has_perm($me, $mod, $acc) {
+  $p = $me["perms"] ?? [];
+  if (in_array("*", $p, true)) return true;
+  return in_array($mod."/".$acc, $p, true);
+}
+function require_perm($mod, $acc) {
+  $me = load_me();
+  if (!$me) fail("no autenticado", 401);
+  if (!has_perm($me, $mod, $acc)) fail("sin permisos", 403);
+  return $me;
 }
 
-/* ===== auth ===== */
+function to_hm($t) {
+  if ($t === null || $t === "") return null;
+  $s = (string)$t;
+  if (strlen($s) >= 5) return substr($s, 0, 5);
+  return $s;
+}
 
 if ($action === "me") {
   $me = load_me();
-  if (!$me) fail("no autenticado", 401);
-  resp_me($me);
+  ok(["me" => $me]);
 }
 
 if ($action === "login") {
   global $enlace;
 
-  $usuario = trim(strtolower((string)($body["usuario"] ?? "")));
+  $usuario = trim((string)($body["usuario"] ?? ""));
   $password = (string)($body["password"] ?? "");
-  if ($usuario === "" || $password === "") fail("datos incompletos");
 
-  $stmt = mysqli_prepare($enlace, "
-    SELECT u.id, u.usuario, u.nombres, u.apellidos, u.cedula, u.fecha_nacimiento,
-           u.password_hash, u.activo, u.rol_id,
-           u.intentos_fallidos, u.bloqueado_hasta,
-           COALESCE(r.nombre,'') AS rol_nombre,
-           (u.bloqueado_hasta IS NOT NULL AND u.bloqueado_hasta > NOW()) AS is_blocked,
-           IF(u.bloqueado_hasta IS NULL, 0, TIMESTAMPDIFF(MINUTE, NOW(), u.bloqueado_hasta)) AS mins_left
-    FROM usuarios u
-    LEFT JOIN roles r ON r.id=u.rol_id
-    WHERE u.usuario=? LIMIT 1
-  ");
-  if (!$stmt) fail("error interno", 500);
+  if ($usuario === "" || $password === "") fail("datos incompletos", 400);
 
-  mysqli_stmt_bind_param($stmt, "s", $usuario);
-  mysqli_stmt_execute($stmt);
-  $res = mysqli_stmt_get_result($stmt);
-  $row = $res ? mysqli_fetch_assoc($res) : null;
-  mysqli_stmt_close($stmt);
+  $sql = "SELECT u.id,u.usuario,u.nombres,u.apellidos,u.password_hash,u.activo,u.rol_id,
+                 u.intentos_fallidos,u.bloqueado_hasta,
+                 r.nombre AS rol
+          FROM usuarios u
+          LEFT JOIN roles r ON r.id=u.rol_id
+          WHERE u.usuario=? LIMIT 1";
+  $st = mysqli_prepare($enlace, $sql);
+  mysqli_stmt_bind_param($st, "s", $usuario);
+  mysqli_stmt_execute($st);
+  $rs = mysqli_stmt_get_result($st);
+  $u = mysqli_fetch_assoc($rs) ?: null;
+  mysqli_stmt_close($st);
 
-  if (!$row) fail("usuario o contraseña incorrectos", 401);
-
-  if ((int)$row["is_blocked"] === 1) {
-    $m = (int)$row["mins_left"]; if ($m < 1) $m = 1;
-    audit("login_blocked", "usuarios", (int)$row["id"], "bloqueado, mins_left={$m}");
-    fail("demasiados intentos. intenta en {$m} min", 429);
+  if (!$u) {
+    audit_safe("login_fail", "usuarios", null, "usuario inexistente");
+    fail("credenciales inválidas", 401);
   }
 
-  if ((int)$row["activo"] !== 1) {
-    audit("login_fail", "usuarios", (int)$row["id"], "usuario inactivo");
+  $uid = (int)$u["id"];
+
+  if ((int)$u["activo"] !== 1) {
+    audit_safe("login_fail", "usuarios", $uid, "usuario inactivo");
     fail("usuario inactivo", 403);
   }
 
-  if (!password_verify($password, (string)$row["password_hash"])) {
-    $intentos = (int)$row["intentos_fallidos"] + 1;
-
-    if ($intentos >= 3) {
-      $up = mysqli_prepare($enlace, "
-        UPDATE usuarios
-        SET intentos_fallidos=0,
-            bloqueado_hasta=DATE_ADD(NOW(), INTERVAL 5 MINUTE)
-        WHERE id=?
-      ");
-      mysqli_stmt_bind_param($up, "i", $row["id"]);
-      mysqli_stmt_execute($up);
-      mysqli_stmt_close($up);
-
-      audit("login_fail_block", "usuarios", (int)$row["id"], "bloqueado 5 min");
-      fail("demasiados intentos. intenta en 5 min", 429);
+  if (!empty($u["bloqueado_hasta"])) {
+    $bh = strtotime($u["bloqueado_hasta"]);
+    $now = time();
+    if ($bh !== false && $bh > $now) {
+      $mins = (int)ceil(($bh - $now) / 60);
+      audit_safe("login_blocked", "usuarios", $uid, "bloqueado, mins_left=".$mins);
+      fail("bloqueado, espera ".$mins." min", 403);
     }
-
-    $up = mysqli_prepare($enlace, "UPDATE usuarios SET intentos_fallidos=? WHERE id=?");
-    mysqli_stmt_bind_param($up, "ii", $intentos, $row["id"]);
-    mysqli_stmt_execute($up);
-    mysqli_stmt_close($up);
-
-    $r = 3 - $intentos;
-    audit("login_fail", "usuarios", (int)$row["id"], "password incorrecta, intentos={$intentos}");
-    fail("usuario o contraseña incorrectos. te quedan {$r} intento(s)", 401);
   }
 
-  $up = mysqli_prepare($enlace, "UPDATE usuarios SET intentos_fallidos=0, bloqueado_hasta=NULL WHERE id=?");
-  mysqli_stmt_bind_param($up, "i", $row["id"]);
-  mysqli_stmt_execute($up);
-  mysqli_stmt_close($up);
+  if (!password_verify($password, (string)$u["password_hash"])) {
+    $intentos = (int)$u["intentos_fallidos"] + 1;
+    $bloq = null;
+    if ($intentos >= 2) {
+      $bloq = date("Y-m-d H:i:s", time() + 5 * 60);
+      $intentos = 0;
+    }
 
-  session_regenerate_id(true);
+    if ($bloq) {
+      $su = mysqli_prepare($enlace, "UPDATE usuarios SET intentos_fallidos=?, bloqueado_hasta=? WHERE id=?");
+      mysqli_stmt_bind_param($su, "isi", $intentos, $bloq, $uid);
+      mysqli_stmt_execute($su);
+      mysqli_stmt_close($su);
+      audit_safe("login_fail_block", "usuarios", $uid, "bloqueado 5 min");
+      fail("password incorrecta, bloqueado 5 min", 403);
+    } else {
+      $su = mysqli_prepare($enlace, "UPDATE usuarios SET intentos_fallidos=? WHERE id=?");
+      mysqli_stmt_bind_param($su, "ii", $intentos, $uid);
+      mysqli_stmt_execute($su);
+      mysqli_stmt_close($su);
+      audit_safe("login_fail", "usuarios", $uid, "password incorrecta, intentos=".$intentos);
+      fail("credenciales inválidas", 401);
+    }
+  }
 
-  $_SESSION["usuario_id"] = (int)$row["id"];
-  $_SESSION["usuario"] = (string)$row["usuario"];
-  $_SESSION["rol_id"] = $row["rol_id"] === null ? 0 : (int)$row["rol_id"];
-  $_SESSION["rol_nombre"] = (string)($row["rol_nombre"] ?? "");
-  $_SESSION["last_activity"] = time();
+  $su = mysqli_prepare($enlace, "UPDATE usuarios SET intentos_fallidos=0, bloqueado_hasta=NULL WHERE id=?");
+  mysqli_stmt_bind_param($su, "i", $uid);
+  mysqli_stmt_execute($su);
+  mysqli_stmt_close($su);
 
-  audit("login_ok", "usuarios", (int)$row["id"], "inicio de sesión");
+  $_SESSION["usuario_id"] = $uid;
+  $_SESSION["rol"] = (string)($u["rol"] ?? "");
+  $_SESSION["activo"] = (int)$u["activo"];
 
-  $me = load_me();
-  if (!$me) fail("error interno", 500);
-  resp_me($me);
+  audit_safe("login_ok", "usuarios", $uid, "inicio de sesión");
+  ok(["me" => load_me()]);
 }
 
 if ($action === "logout") {
-  $uid = (int)($_SESSION["usuario_id"] ?? 0);
-  if ($uid > 0) audit("logout", "usuarios", $uid, "cierre de sesión");
+  $me = load_me();
+  if ($me) audit_safe("logout", "usuarios", (int)$me["id"], "cierre de sesión");
   $_SESSION = [];
+  if (ini_get("session.use_cookies")) {
+    $p = session_get_cookie_params();
+    setcookie(session_name(), "", time() - 42000, $p["path"], $p["domain"], $p["secure"], $p["httponly"]);
+  }
   session_destroy();
   ok();
 }
 
-require_login();
-
-/* ===================== USUARIOS ===================== */
-
 if ($action === "usuarios_list") {
-  require_perm("usuarios", "ver");
+  require_perm("usuarios","ver");
+  global $enlace;
 
-  $q = mysqli_query($enlace, "
-    SELECT u.id, u.usuario, u.nombres, u.apellidos, u.cedula, u.fecha_nacimiento,
-           u.activo, u.rol_id, COALESCE(r.nombre,'(sin rol)') AS rol_nombre
-    FROM usuarios u
-    LEFT JOIN roles r ON r.id=u.rol_id
-    ORDER BY u.id DESC
-  ");
-  $data = [];
-  while ($q && ($row = mysqli_fetch_assoc($q))) $data[] = $row;
-  ok(["data" => $data]);
+  $q = trim((string)($_GET["q"] ?? ""));
+  $incluye_inactivos = (int)($_GET["incluye_inactivos"] ?? 0);
+
+  $where = [];
+  $params = [];
+  $types = "";
+
+  if (!$incluye_inactivos) {
+    $where[] = "u.activo=1";
+  }
+  if ($q !== "") {
+    $where[] = "(u.usuario LIKE CONCAT('%',?,'%') OR u.nombres LIKE CONCAT('%',?,'%') OR u.apellidos LIKE CONCAT('%',?,'%') OR u.cedula LIKE CONCAT('%',?,'%'))";
+    $types .= "ssss";
+    $params[] = $q; $params[] = $q; $params[] = $q; $params[] = $q;
+  }
+
+  $ws = $where ? ("WHERE ".implode(" AND ", $where)) : "";
+  $sql = "SELECT u.id,u.usuario,u.nombres,u.apellidos,u.cedula,u.fecha_nacimiento,u.activo,u.rol_id,
+                 r.nombre AS rol
+          FROM usuarios u
+          LEFT JOIN roles r ON r.id=u.rol_id
+          $ws
+          ORDER BY u.id DESC";
+
+  $st = mysqli_prepare($enlace, $sql);
+  if ($types !== "") mysqli_stmt_bind_param($st, $types, ...$params);
+  mysqli_stmt_execute($st);
+  $rs = mysqli_stmt_get_result($st);
+
+  $out = [];
+  while ($row = mysqli_fetch_assoc($rs)) {
+    $row["rol_id"] = $row["rol_id"] === null ? null : (int)$row["rol_id"];
+    $row["id"] = (int)$row["id"];
+    $row["activo"] = (int)$row["activo"];
+    $out[] = $row;
+  }
+  mysqli_stmt_close($st);
+  ok(["usuarios" => $out]);
 }
 
 if ($action === "usuarios_create") {
-  require_perm("usuarios", "crear");
+  $me = require_perm("usuarios","crear");
+  global $enlace;
 
-  $usuario = trim(strtolower((string)($body["usuario"] ?? "")));
+  $usuario = trim((string)($body["usuario"] ?? ""));
   $nombres = trim((string)($body["nombres"] ?? ""));
   $apellidos = trim((string)($body["apellidos"] ?? ""));
-  $cedula_raw = (string)($body["cedula"] ?? "");
-  $fecha_nacimiento = (string)($body["fecha_nacimiento"] ?? "");
-  $pass = (string)($body["password"] ?? "");
+  $cedula = trim((string)($body["cedula"] ?? ""));
+  $fecha_nacimiento = trim((string)($body["fecha_nacimiento"] ?? ""));
+  $password = (string)($body["password"] ?? "");
+  $rol_id = array_key_exists("rol_id",$body) ? (($body["rol_id"]===null||$body["rol_id"]==="") ? null : (int)$body["rol_id"]) : null;
 
-  $rol_id = null;
-  if (is_admin()) {
-    $rol_raw = $body["rol_id"] ?? null;
-    if ($rol_raw === "" || $rol_raw === "0" || $rol_raw === 0) $rol_raw = null;
-    $rol_id = $rol_raw === null ? null : (int)$rol_raw;
-    if ($rol_id !== null && $rol_id <= 0) $rol_id = null;
+  if ($usuario===""||$nombres===""||$apellidos===""||$cedula===""||$fecha_nacimiento===""||$password==="") fail("datos incompletos");
+
+  $hash = password_hash($password, PASSWORD_BCRYPT);
+
+  $st = mysqli_prepare($enlace, "INSERT INTO usuarios(usuario,nombres,apellidos,cedula,fecha_nacimiento,password_hash,rol_id,activo) VALUES(?,?,?,?,?,?,?,1)");
+  mysqli_stmt_bind_param($st, "ssssssi", $usuario, $nombres, $apellidos, $cedula, $fecha_nacimiento, $hash, $rol_id);
+  if (!mysqli_stmt_execute($st)) {
+    $e = mysqli_stmt_error($st);
+    mysqli_stmt_close($st);
+    fail($e ?: "no se pudo crear", 400);
   }
-
-  if ($usuario === "" || $nombres === "" || $apellidos === "" || $cedula_raw === "" || $fecha_nacimiento === "" || $pass === "") fail("datos incompletos");
-  if (strlen($pass) < 8) fail("contraseña mínima 8 caracteres");
-
-  [$okc, $cedula, $errc] = validar_cedula_ec($cedula_raw);
-  if (!$okc) fail($errc);
-
-  $edad = edad_desde_fecha($fecha_nacimiento);
-  if ($edad === null) fail("fecha de nacimiento inválida");
-  if ($edad < 18) fail("solo mayores de edad (18+)");
-
-  $hash = password_hash($pass, PASSWORD_BCRYPT);
-
-  if ($rol_id === null) {
-    $st = mysqli_prepare($enlace, "
-      INSERT INTO usuarios (usuario,nombres,apellidos,cedula,fecha_nacimiento,password_hash,activo,intentos_fallidos)
-      VALUES (?,?,?,?,?,?,1,0)
-    ");
-    if (!$st) fail("error interno",500);
-    mysqli_stmt_bind_param($st, "ssssss", $usuario, $nombres, $apellidos, $cedula, $fecha_nacimiento, $hash);
-  } else {
-    $st = mysqli_prepare($enlace, "
-      INSERT INTO usuarios (usuario,nombres,apellidos,cedula,fecha_nacimiento,password_hash,rol_id,activo,intentos_fallidos)
-      VALUES (?,?,?,?,?,?,?,1,0)
-    ");
-    if (!$st) fail("error interno",500);
-    mysqli_stmt_bind_param($st, "ssssssi", $usuario, $nombres, $apellidos, $cedula, $fecha_nacimiento, $hash, $rol_id);
-  }
-
-  $okExec = mysqli_stmt_execute($st);
-  $err = mysqli_stmt_error($st);
+  $id = (int)mysqli_insert_id($enlace);
   mysqli_stmt_close($st);
 
-  if (!$okExec) {
-    if (is_duplicate_error($err)) {
-      $f = dup_field($err);
-      if ($f === "cedula") fail("cédula ya existe", 409);
-      if ($f === "usuario") fail("usuario ya existe", 409);
-      fail("registro duplicado", 409);
-    }
-    fail("error al crear usuario", 500);
-  }
-
-  $newId = (int)mysqli_insert_id($enlace);
-  audit("usuarios_create", "usuarios", $newId > 0 ? $newId : null, "creó usuario {$usuario}");
-  ok();
+  audit_safe("usuarios_create", "usuarios", $id, "creó usuario ".$usuario);
+  ok(["id"=>$id]);
 }
 
 if ($action === "usuarios_update") {
-  require_perm("usuarios", "editar");
+  $me = require_perm("usuarios","editar");
+  global $enlace;
 
   $id = (int)($body["id"] ?? 0);
-  $usuario = trim(strtolower((string)($body["usuario"] ?? "")));
+  if ($id<=0) fail("id inválido");
+
+  $usuario = trim((string)($body["usuario"] ?? ""));
   $nombres = trim((string)($body["nombres"] ?? ""));
   $apellidos = trim((string)($body["apellidos"] ?? ""));
-  $cedula_raw = (string)($body["cedula"] ?? "");
-  $fecha_nacimiento = (string)($body["fecha_nacimiento"] ?? "");
-  $activo = (int)($body["activo"] ?? 1);
+  $cedula = trim((string)($body["cedula"] ?? ""));
+  $fecha_nacimiento = trim((string)($body["fecha_nacimiento"] ?? ""));
+  $rol_id = array_key_exists("rol_id",$body) ? (($body["rol_id"]===null||$body["rol_id"]==="") ? null : (int)$body["rol_id"]) : null;
+  $activo = array_key_exists("activo",$body) ? (int)$body["activo"] : null;
+  $password = array_key_exists("password",$body) ? (string)$body["password"] : null;
 
-  if ($id <= 0) fail("id inválido");
-  if ($usuario === "" || $nombres === "" || $apellidos === "" || $cedula_raw === "" || $fecha_nacimiento === "") fail("datos incompletos");
+  $sets = [];
+  $params = [];
+  $types = "";
 
-  [$okc, $cedula, $errc] = validar_cedula_ec($cedula_raw);
-  if (!$okc) fail($errc);
+  if ($usuario!=="") { $sets[]="usuario=?"; $types.="s"; $params[]=$usuario; }
+  if ($nombres!=="") { $sets[]="nombres=?"; $types.="s"; $params[]=$nombres; }
+  if ($apellidos!=="") { $sets[]="apellidos=?"; $types.="s"; $params[]=$apellidos; }
+  if ($cedula!=="") { $sets[]="cedula=?"; $types.="s"; $params[]=$cedula; }
+  if ($fecha_nacimiento!=="") { $sets[]="fecha_nacimiento=?"; $types.="s"; $params[]=$fecha_nacimiento; }
 
-  $edad = edad_desde_fecha($fecha_nacimiento);
-  if ($edad === null) fail("fecha de nacimiento inválida");
-  if ($edad < 18) fail("solo mayores de edad (18+)");
+  if (array_key_exists("rol_id",$body)) { $sets[]="rol_id=?"; $types.="i"; $params[]=$rol_id; }
+  if (array_key_exists("activo",$body)) { $sets[]="activo=?"; $types.="i"; $params[]=$activo; }
 
-  $passNew = isset($body["password"]) ? trim((string)$body["password"]) : "";
-  $setPass = ($passNew !== "");
-  $hash = null;
-  if ($setPass) {
-    if (strlen($passNew) < 8) fail("contraseña mínima 8 caracteres");
-    $hash = password_hash($passNew, PASSWORD_BCRYPT);
+  if ($password !== null && $password !== "") {
+    $hash = password_hash($password, PASSWORD_BCRYPT);
+    $sets[]="password_hash=?";
+    $types.="s";
+    $params[]=$hash;
+    $sets[]="intentos_fallidos=0";
+    $sets[]="bloqueado_hasta=NULL";
   }
 
-  $rol_id = null;
-  $changeRol = false;
-  if (is_admin() && array_key_exists("rol_id", $body)) {
-    $changeRol = true;
-    $rol_raw = $body["rol_id"];
-    if ($rol_raw === "" || $rol_raw === "0" || $rol_raw === 0 || $rol_raw === null) $rol_id = null;
-    else { $rol_id = (int)$rol_raw; if ($rol_id <= 0) $rol_id = null; }
-  }
+  if (!$sets) fail("nada que actualizar");
 
-  $sql = "UPDATE usuarios SET usuario=?, nombres=?, apellidos=?, cedula=?, fecha_nacimiento=?, activo=?";
-  $types = "sssssi";
-  $params = [$usuario, $nombres, $apellidos, $cedula, $fecha_nacimiento, $activo];
-
-  if ($changeRol) {
-    if ($rol_id === null) $sql .= ", rol_id=NULL";
-    else { $sql .= ", rol_id=?"; $types .= "i"; $params[] = $rol_id; }
-  }
-
-  if ($setPass) { $sql .= ", password_hash=?"; $types .= "s"; $params[] = $hash; }
-
-  $sql .= " WHERE id=?";
+  $sql = "UPDATE usuarios SET ".implode(",", $sets)." WHERE id=?";
   $types .= "i";
   $params[] = $id;
 
   $st = mysqli_prepare($enlace, $sql);
-  if (!$st) fail("error interno", 500);
-
   mysqli_stmt_bind_param($st, $types, ...$params);
-  $okExec = mysqli_stmt_execute($st);
-  $err = mysqli_stmt_error($st);
+  if (!mysqli_stmt_execute($st)) {
+    $e = mysqli_stmt_error($st);
+    mysqli_stmt_close($st);
+    fail($e ?: "no se pudo actualizar", 400);
+  }
   mysqli_stmt_close($st);
 
-  if (!$okExec) {
-    if (is_duplicate_error($err)) {
-      $f = dup_field($err);
-      if ($f === "cedula") fail("cédula ya existe", 409);
-      if ($f === "usuario") fail("usuario ya existe", 409);
-      fail("registro duplicado", 409);
-    }
-    fail("error al actualizar usuario", 500);
-  }
-
-  audit("usuarios_update", "usuarios", $id, "editó usuario {$id} -> {$usuario}");
+  audit_safe("usuarios_update", "usuarios", $id, "editó usuario ".$id);
   ok();
 }
 
 if ($action === "usuarios_delete") {
-  require_perm("usuarios", "eliminar");
+  $me = require_perm("usuarios","eliminar");
+  global $enlace;
 
   $id = (int)($body["id"] ?? 0);
-  if ($id <= 0) fail("id inválido");
+  if ($id<=0) fail("id inválido");
 
-  $myId = (int)($_SESSION["usuario_id"] ?? 0);
-  if ($id === $myId) fail("no puedes desactivarte");
-
-  $st = mysqli_prepare($enlace, "
-    SELECT u.id, COALESCE(r.nombre,'') AS rol_nombre
-    FROM usuarios u
-    LEFT JOIN roles r ON r.id=u.rol_id
-    WHERE u.id=? LIMIT 1
-  ");
-  if (!$st) fail("error interno", 500);
+  $st = mysqli_prepare($enlace, "SELECT u.id,u.rol_id,r.nombre AS rol FROM usuarios u LEFT JOIN roles r ON r.id=u.rol_id WHERE u.id=? LIMIT 1");
   mysqli_stmt_bind_param($st, "i", $id);
   mysqli_stmt_execute($st);
-  $res = mysqli_stmt_get_result($st);
-  $target = $res ? mysqli_fetch_assoc($res) : null;
+  $rs = mysqli_stmt_get_result($st);
+  $u = mysqli_fetch_assoc($rs) ?: null;
+  mysqli_stmt_close($st);
+  if (!$u) fail("no existe");
+
+  if (strtolower((string)($u["rol"] ?? "")) === "admin") fail("no se puede eliminar un admin", 403);
+
+  $st = mysqli_prepare($enlace, "UPDATE usuarios SET activo=0 WHERE id=?");
+  mysqli_stmt_bind_param($st, "i", $id);
+  if (!mysqli_stmt_execute($st)) {
+    $e = mysqli_stmt_error($st);
+    mysqli_stmt_close($st);
+    fail($e ?: "no se pudo desactivar", 400);
+  }
   mysqli_stmt_close($st);
 
-  if (!$target) fail("usuario no existe", 404);
-
-  $rolTarget = strtolower(trim((string)($target["rol_nombre"] ?? "")));
-  if ($rolTarget === "admin") fail("no se puede desactivar un usuario con rol admin", 403);
-
-  $st2 = mysqli_prepare($enlace, "UPDATE usuarios SET activo=0 WHERE id=?");
-  if (!$st2) fail("error interno", 500);
-  mysqli_stmt_bind_param($st2, "i", $id);
-  mysqli_stmt_execute($st2);
-  mysqli_stmt_close($st2);
-
-  audit("usuarios_delete", "usuarios", $id, "desactivó usuario {$id}");
+  audit_safe("usuarios_delete", "usuarios", $id, "desactivó usuario ".$id);
   ok();
 }
 
-/* ===================== ROLES ===================== */
-
 if ($action === "roles_list") {
-  require_perm("roles", "ver");
+  require_perm("roles","ver");
+  global $enlace;
 
-  $q = mysqli_query($enlace, "SELECT id, nombre, descripcion, es_sistema FROM roles ORDER BY id DESC");
-  $data = [];
-  while ($q && ($r = mysqli_fetch_assoc($q))) $data[] = $r;
-  ok(["data" => $data]);
+  $st = mysqli_prepare($enlace, "SELECT id,nombre,descripcion,es_sistema,creado_por,creado_en FROM roles ORDER BY id DESC");
+  mysqli_stmt_execute($st);
+  $rs = mysqli_stmt_get_result($st);
+
+  $out = [];
+  while ($row = mysqli_fetch_assoc($rs)) {
+    $row["id"] = (int)$row["id"];
+    $row["es_sistema"] = (int)$row["es_sistema"];
+    $row["creado_por"] = $row["creado_por"] === null ? null : (int)$row["creado_por"];
+    $out[] = $row;
+  }
+  mysqli_stmt_close($st);
+  ok(["roles"=>$out]);
 }
 
 if ($action === "roles_create") {
-  $myRol = (int)($_SESSION["rol_id"] ?? 0);
-  if ($myRol <= 0) fail("debes tener un rol asignado para crear roles", 403);
+  $me = require_perm("roles","crear");
+  global $enlace;
 
-  $nombre = trim(strtolower((string)($body["nombre"] ?? "")));
-  $desc = trim((string)($body["descripcion"] ?? ""));
+  $nombre = trim((string)($body["nombre"] ?? ""));
+  $descripcion = trim((string)($body["descripcion"] ?? ""));
+  if ($nombre==="") fail("nombre requerido");
 
-  if ($nombre === "") fail("nombre requerido");
-  if (!preg_match("/^[a-z0-9_]{3,50}$/", $nombre)) fail("nombre inválido (3-50, a-z 0-9 _ )");
+  $uid = (int)$_SESSION["usuario_id"];
 
-  $st = mysqli_prepare($enlace, "INSERT INTO roles (nombre, descripcion, es_sistema) VALUES (?, ?, 0)");
-  if (!$st) fail("error interno",500);
-  mysqli_stmt_bind_param($st, "ss", $nombre, $desc);
-  $okExec = mysqli_stmt_execute($st);
-  $err = mysqli_stmt_error($st);
+  $st = mysqli_prepare($enlace, "INSERT INTO roles(nombre,descripcion,es_sistema,creado_por) VALUES(?,?,0,?)");
+  mysqli_stmt_bind_param($st, "ssi", $nombre, $descripcion, $uid);
+  if (!mysqli_stmt_execute($st)) {
+    $e = mysqli_stmt_error($st);
+    mysqli_stmt_close($st);
+    fail($e ?: "no se pudo crear", 400);
+  }
+  $id = (int)mysqli_insert_id($enlace);
   mysqli_stmt_close($st);
 
-  if (!$okExec) {
-    if (is_duplicate_error($err)) fail("rol ya existe", 409);
-    fail("error al crear rol", 500);
-  }
-
-  $newId = (int)mysqli_insert_id($enlace);
-  audit("roles_create", "roles", $newId > 0 ? $newId : null, "creó rol {$nombre}");
-  ok();
+  audit_safe("roles_create","roles",$id,"creó rol ".$nombre);
+  ok(["id"=>$id]);
 }
 
 if ($action === "roles_update") {
-  require_perm("roles", "editar");
+  $me = require_perm("roles","editar");
+  global $enlace;
 
   $id = (int)($body["id"] ?? 0);
-  $desc = trim((string)($body["descripcion"] ?? ""));
-  if ($id <= 0) fail("id inválido");
+  if ($id<=0) fail("id inválido");
 
-  $q = mysqli_query($enlace, "SELECT es_sistema FROM roles WHERE id={$id} LIMIT 1");
-  $rr = $q ? mysqli_fetch_assoc($q) : null;
-  if (!$rr) fail("rol no existe", 404);
-  if ((int)$rr["es_sistema"] === 1) fail("no puedes editar un rol del sistema", 403);
+  $st0 = mysqli_prepare($enlace, "SELECT es_sistema FROM roles WHERE id=? LIMIT 1");
+  mysqli_stmt_bind_param($st0, "i", $id);
+  mysqli_stmt_execute($st0);
+  $rs0 = mysqli_stmt_get_result($st0);
+  $r0 = mysqli_fetch_assoc($rs0) ?: null;
+  mysqli_stmt_close($st0);
+  if (!$r0) fail("no existe");
+  if ((int)$r0["es_sistema"] === 1) fail("rol del sistema no editable", 403);
 
-  $st = mysqli_prepare($enlace, "UPDATE roles SET descripcion=? WHERE id=?");
-  if (!$st) fail("error interno",500);
-  mysqli_stmt_bind_param($st, "si", $desc, $id);
-  mysqli_stmt_execute($st);
+  $nombre = trim((string)($body["nombre"] ?? ""));
+  $descripcion = trim((string)($body["descripcion"] ?? ""));
+
+  $sets = [];
+  $params = [];
+  $types = "";
+
+  if ($nombre!=="") { $sets[]="nombre=?"; $types.="s"; $params[]=$nombre; }
+  if (array_key_exists("descripcion",$body)) { $sets[]="descripcion=?"; $types.="s"; $params[]=$descripcion; }
+
+  if (!$sets) fail("nada que actualizar");
+
+  $sql = "UPDATE roles SET ".implode(",", $sets)." WHERE id=?";
+  $types.="i";
+  $params[]=$id;
+
+  $st = mysqli_prepare($enlace, $sql);
+  mysqli_stmt_bind_param($st, $types, ...$params);
+  if (!mysqli_stmt_execute($st)) {
+    $e = mysqli_stmt_error($st);
+    mysqli_stmt_close($st);
+    fail($e ?: "no se pudo actualizar", 400);
+  }
   mysqli_stmt_close($st);
 
-  audit("roles_update", "roles", $id, "editó rol {$id}");
+  audit_safe("roles_update","roles",$id,"editó rol ".$id);
   ok();
 }
 
 if ($action === "roles_delete") {
-  fail("los roles no se eliminan", 403);
-}
+  $me = require_perm("roles","eliminar");
+  global $enlace;
 
-/* ===================== PERMISOS ===================== */
+  $id = (int)($body["id"] ?? 0);
+  if ($id<=0) fail("id inválido");
 
-if ($action === "permisos_get") {
-  require_perm("permisos", "ver");
+  $st0 = mysqli_prepare($enlace, "SELECT es_sistema FROM roles WHERE id=? LIMIT 1");
+  mysqli_stmt_bind_param($st0, "i", $id);
+  mysqli_stmt_execute($st0);
+  $rs0 = mysqli_stmt_get_result($st0);
+  $r0 = mysqli_fetch_assoc($rs0) ?: null;
+  mysqli_stmt_close($st0);
+  if (!$r0) fail("no existe");
+  if ((int)$r0["es_sistema"] === 1) fail("rol del sistema no eliminable", 403);
 
-  $roles = [];
-  $q = mysqli_query($enlace, "SELECT id, nombre, descripcion FROM roles ORDER BY id DESC");
-  while ($q && ($r = mysqli_fetch_assoc($q))) $roles[] = $r;
-
-  $map = [];
-  $q2 = mysqli_query($enlace, "
-    SELECT rp.rol_id, p.modulo, p.accion
-    FROM rol_permisos rp
-    JOIN permisos p ON p.id=rp.permiso_id
-  ");
-  while ($q2 && ($x = mysqli_fetch_assoc($q2))) {
-    $k = (string)$x["rol_id"];
-    if (!isset($map[$k])) $map[$k] = [];
-    $map[$k][] = $x["modulo"] . "." . $x["accion"];
+  $st = mysqli_prepare($enlace, "DELETE FROM roles WHERE id=?");
+  mysqli_stmt_bind_param($st, "i", $id);
+  if (!mysqli_stmt_execute($st)) {
+    $e = mysqli_stmt_error($st);
+    mysqli_stmt_close($st);
+    fail($e ?: "no se pudo eliminar", 400);
   }
+  mysqli_stmt_close($st);
 
-  ok(["roles" => $roles, "map" => $map]);
-}
-
-if ($action === "permisos_set") {
-  require_perm("permisos", "editar");
-  if (!is_admin()) fail("solo admin", 403);
-
-  $rol_id = (int)($body["rol_id"] ?? 0);
-  $perms = $body["perms"] ?? [];
-  if ($rol_id <= 0) fail("rol inválido");
-
-  mysqli_begin_transaction($enlace);
-
-  $stDel = mysqli_prepare($enlace, "DELETE FROM rol_permisos WHERE rol_id=?");
-  if (!$stDel) { mysqli_rollback($enlace); fail("error interno",500); }
-  mysqli_stmt_bind_param($stDel, "i", $rol_id);
-  mysqli_stmt_execute($stDel);
-  mysqli_stmt_close($stDel);
-
-  $stFind = mysqli_prepare($enlace, "SELECT id FROM permisos WHERE modulo=? AND accion=? LIMIT 1");
-  $stIns  = mysqli_prepare($enlace, "INSERT INTO rol_permisos (rol_id, permiso_id) VALUES (?, ?)");
-  if (!$stFind || !$stIns) { mysqli_rollback($enlace); fail("error interno",500); }
-
-  $count = 0;
-  foreach ($perms as $p) {
-    $p = (string)$p;
-    if (!str_contains($p, ".")) continue;
-    [$m, $a] = explode(".", $p, 2);
-    $m = trim($m); $a = trim($a);
-    if ($m === "" || $a === "") continue;
-
-    mysqli_stmt_bind_param($stFind, "ss", $m, $a);
-    mysqli_stmt_execute($stFind);
-    $res = mysqli_stmt_get_result($stFind);
-    $row = $res ? mysqli_fetch_assoc($res) : null;
-
-    if ($row && isset($row["id"])) {
-      $pid = (int)$row["id"];
-      mysqli_stmt_bind_param($stIns, "ii", $rol_id, $pid);
-      mysqli_stmt_execute($stIns);
-      $count++;
-    }
-  }
-
-  mysqli_stmt_close($stFind);
-  mysqli_stmt_close($stIns);
-
-  mysqli_commit($enlace);
-
-  audit("permisos_set", "rol_permisos", $rol_id, "asignó {$count} permiso(s) al rol {$rol_id}");
+  audit_safe("roles_delete","roles",$id,"eliminó rol ".$id);
   ok();
 }
 
-/* =========================
-   cursos
-   ========================= */
-
-if ($action === "cursos_list") {
-  require_active_user();
-  require_perm("cursos","ver");
+if ($action === "permisos_get") {
+  $me = require_perm("permisos","ver");
   global $enlace;
 
-  $sql = "SELECT c.id,c.nombre,c.paralelo,c.periodo,c.docente_id,c.dia_semana,
-                 TIME_FORMAT(c.hora_inicio,'%H:%i') hora_inicio,
-                 TIME_FORMAT(c.hora_fin,'%H:%i') hora_fin,
-                 c.aula,c.activo,
-                 CONCAT(u.nombres,' ',u.apellidos) docente_nombre
+  $rol_id = (int)($_GET["rol_id"] ?? 0);
+
+  $perms = [];
+  $st = mysqli_prepare($enlace, "SELECT id,modulo,accion,descripcion FROM permisos ORDER BY modulo,accion");
+  mysqli_stmt_execute($st);
+  $rs = mysqli_stmt_get_result($st);
+  while ($row = mysqli_fetch_assoc($rs)) {
+    $row["id"] = (int)$row["id"];
+    $perms[] = $row;
+  }
+  mysqli_stmt_close($st);
+
+  $asignados = [];
+  if ($rol_id > 0) {
+    $st2 = mysqli_prepare($enlace, "SELECT permiso_id FROM rol_permisos WHERE rol_id=?");
+    mysqli_stmt_bind_param($st2, "i", $rol_id);
+    mysqli_stmt_execute($st2);
+    $rs2 = mysqli_stmt_get_result($st2);
+    while ($r = mysqli_fetch_assoc($rs2)) $asignados[] = (int)$r["permiso_id"];
+    mysqli_stmt_close($st2);
+  }
+
+  ok(["permisos"=>$perms,"asignados"=>$asignados]);
+}
+
+if ($action === "permisos_set") {
+  $me = require_perm("permisos","editar");
+  global $enlace;
+
+  $rol_id = (int)($body["rol_id"] ?? 0);
+  $perm_ids = $body["perm_ids"] ?? [];
+  if ($rol_id<=0 || !is_array($perm_ids)) fail("datos inválidos");
+
+  $st0 = mysqli_prepare($enlace, "SELECT es_sistema FROM roles WHERE id=? LIMIT 1");
+  mysqli_stmt_bind_param($st0, "i", $rol_id);
+  mysqli_stmt_execute($st0);
+  $rs0 = mysqli_stmt_get_result($st0);
+  $r0 = mysqli_fetch_assoc($rs0) ?: null;
+  mysqli_stmt_close($st0);
+  if (!$r0) fail("rol no existe");
+
+  mysqli_begin_transaction($enlace);
+  try {
+    $sd = mysqli_prepare($enlace, "DELETE FROM rol_permisos WHERE rol_id=?");
+    mysqli_stmt_bind_param($sd, "i", $rol_id);
+    mysqli_stmt_execute($sd);
+    mysqli_stmt_close($sd);
+
+    $ins = mysqli_prepare($enlace, "INSERT INTO rol_permisos(rol_id,permiso_id) VALUES(?,?)");
+    foreach ($perm_ids as $pid) {
+      $pid = (int)$pid;
+      if ($pid<=0) continue;
+      mysqli_stmt_bind_param($ins, "ii", $rol_id, $pid);
+      mysqli_stmt_execute($ins);
+    }
+    mysqli_stmt_close($ins);
+
+    mysqli_commit($enlace);
+  } catch (Throwable $t) {
+    mysqli_rollback($enlace);
+    fail("no se pudo guardar permisos", 400);
+  }
+
+  audit_safe("permisos_set","rol_permisos",$rol_id,"asignó ".count($perm_ids)." permiso(s) al rol ".$rol_id);
+  ok();
+}
+
+if ($action === "cursos_list") {
+  $me = require_perm("cursos","ver");
+  global $enlace;
+
+  $periodo = trim((string)($_GET["periodo"] ?? ""));
+  $solo_activos = (int)($_GET["solo_activos"] ?? 1);
+  $solo_mios = (int)($_GET["solo_mios"] ?? 0);
+
+  $where = [];
+  $params = [];
+  $types = "";
+
+  if ($solo_activos) $where[] = "c.activo=1";
+  if ($periodo !== "") { $where[] = "c.periodo=?"; $types.="s"; $params[]=$periodo; }
+
+  if ($solo_mios) {
+    $uid = (int)($_SESSION["usuario_id"] ?? 0);
+    $where[] = "c.docente_id=?";
+    $types.="i"; $params[]=$uid;
+  }
+
+  $ws = $where ? ("WHERE ".implode(" AND ", $where)) : "";
+
+  $sql = "SELECT c.id,c.nombre,c.paralelo,c.periodo,c.dia_semana,c.dia_semana2,
+                 c.hora_inicio,c.hora_inicio2,c.hora_fin,c.hora_fin2,c.aula,c.docente_id,
+                 c.creado_por,c.creado_en,c.activo,
+                 CONCAT(u.nombres,' ',u.apellidos) AS docente_nombre,
+                 u.usuario AS docente_usuario
           FROM cursos c
           LEFT JOIN usuarios u ON u.id=c.docente_id
-          WHERE c.activo=1
-          ORDER BY c.periodo DESC, c.nombre ASC, c.paralelo ASC";
-  $r = mysqli_query($enlace, $sql);
-  $rows = [];
-  while ($r && ($row = mysqli_fetch_assoc($r))) $rows[] = $row;
-  ok(["rows"=>$rows]);
+          $ws
+          ORDER BY c.id DESC";
+
+  $st = mysqli_prepare($enlace, $sql);
+  if ($types!=="") mysqli_stmt_bind_param($st, $types, ...$params);
+  mysqli_stmt_execute($st);
+  $rs = mysqli_stmt_get_result($st);
+
+  $out = [];
+  while ($row = mysqli_fetch_assoc($rs)) {
+    $row["id"] = (int)$row["id"];
+    $row["dia_semana"] = (int)$row["dia_semana"];
+    $row["dia_semana2"] = $row["dia_semana2"] === null ? null : (int)$row["dia_semana2"];
+    $row["docente_id"] = $row["docente_id"] === null ? null : (int)$row["docente_id"];
+    $row["creado_por"] = $row["creado_por"] === null ? null : (int)$row["creado_por"];
+    $row["activo"] = (int)$row["activo"];
+    $row["hora_inicio"] = to_hm($row["hora_inicio"]);
+    $row["hora_fin"] = to_hm($row["hora_fin"]);
+    $row["hora_inicio2"] = to_hm($row["hora_inicio2"]);
+    $row["hora_fin2"] = to_hm($row["hora_fin2"]);
+    $out[] = $row;
+  }
+  mysqli_stmt_close($st);
+  ok(["cursos"=>$out]);
 }
 
 if ($action === "cursos_create") {
-  require_active_user();
-  require_perm("cursos","crear");
+  $me = require_perm("cursos","crear");
   global $enlace;
 
-  $nombre = trim((string)($body["nombre"] ?? ""));
+  $nombre   = trim((string)($body["nombre"] ?? ""));
   $paralelo = trim((string)($body["paralelo"] ?? "A"));
-  $periodo = trim((string)($body["periodo"] ?? ""));
-  $docente_id = array_key_exists("docente_id",$body) ? (($body["docente_id"]===""||$body["docente_id"]===null) ? null : (int)$body["docente_id"]) : null;
-  $dia = (int)($body["dia_semana"] ?? 1);
-  $hi = trim((string)($body["hora_inicio"] ?? "07:00"));
-  $hf = trim((string)($body["hora_fin"] ?? "08:00"));
-  $aula = trim((string)($body["aula"] ?? ""));
+  $periodo  = trim((string)($body["periodo"] ?? ""));
+
+  $docente_id = array_key_exists("docente_id",$body)
+    ? (($body["docente_id"]===""||$body["docente_id"]===null) ? null : (int)$body["docente_id"])
+    : null;
+
+  $dia1 = (int)($body["dia_semana"] ?? 1);
+  $hi1  = trim((string)($body["hora_inicio"] ?? "07:00"));
+  $hf1  = trim((string)($body["hora_fin"] ?? "08:00"));
+  $aula1 = trim((string)($body["aula"] ?? ""));
+
+  $dia2 = array_key_exists("dia_semana2",$body) ? $body["dia_semana2"] : null;
+  $dia2 = ($dia2 === "" || $dia2 === null) ? null : (int)$dia2;
+  $hi2  = trim((string)($body["hora_inicio2"] ?? ""));
+  $hf2  = trim((string)($body["hora_fin2"] ?? ""));
+  $aula2 = trim((string)($body["aula2"] ?? ""));
 
   if ($nombre==="" || $periodo==="") fail("datos incompletos");
-  if ($dia < 1 || $dia > 7) fail("dia_semana inválido");
-  if (!preg_match('/^\d{2}:\d{2}$/', $hi) || !preg_match('/^\d{2}:\d{2}$/', $hf)) fail("hora inválida (HH:MM)");
-  if ($hi >= $hf) fail("hora_inicio debe ser menor que hora_fin");
+  if ($dia1 < 1 || $dia1 > 7) fail("dia_semana inválido");
+  if (!preg_match('/^\d{2}:\d{2}$/', $hi1) || !preg_match('/^\d{2}:\d{2}$/', $hf1)) fail("hora inválida (HH:MM)");
+  if ($hi1 >= $hf1) fail("hora_inicio debe ser menor que hora_fin");
+
+  $usa2 = ($dia2 !== null || $hi2 !== "" || $hf2 !== "" || $aula2 !== "");
+  if ($usa2) {
+    if ($dia2 === null || $dia2 < 1 || $dia2 > 7) fail("dia_semana2 inválido");
+    if (!preg_match('/^\d{2}:\d{2}$/', $hi2) || !preg_match('/^\d{2}:\d{2}$/', $hf2)) fail("hora2 inválida (HH:MM)");
+    if ($hi2 >= $hf2) fail("hora_inicio2 debe ser menor que hora_fin2");
+  } else {
+    $dia2 = null; $hi2 = null; $hf2 = null; $aula2 = null;
+  }
 
   $uid = (int)$_SESSION["usuario_id"];
 
-  $stmt = mysqli_prepare($enlace, "INSERT INTO cursos(nombre,paralelo,periodo,docente_id,dia_semana,hora_inicio,hora_fin,aula,creado_por,activo)
-                                   VALUES(?,?,?,?,?,STR_TO_DATE(?, '%H:%i'),STR_TO_DATE(?, '%H:%i'),?,?,1)");
-  if (!$stmt) fail("error interno",500);
+  $sql = "INSERT INTO cursos(
+            nombre,paralelo,periodo,dia_semana,dia_semana2,
+            hora_inicio,hora_inicio2,hora_fin,hora_fin2,aula,docente_id,creado_por,activo
+          ) VALUES(
+            ?,?,?,?,?,
+            STR_TO_DATE(?,'%H:%i'),
+            ".($hi2===null ? "NULL" : "STR_TO_DATE(?,'%H:%i')").",
+            STR_TO_DATE(?,'%H:%i'),
+            ".($hf2===null ? "NULL" : "STR_TO_DATE(?,'%H:%i')").",
+            ?,?,?,1
+          )";
 
-  mysqli_stmt_bind_param($stmt, "sssiiissii", $nombre,$paralelo,$periodo,$docente_id,$dia,$hi,$hf,$aula,$uid);
-  if (!mysqli_stmt_execute($stmt)) {
-    $e = mysqli_stmt_error($stmt);
-    mysqli_stmt_close($stmt);
+  $st = mysqli_prepare($enlace, $sql);
+  if (!$st) fail("error interno", 500);
+
+  if ($hi2===null && $hf2===null) {
+    mysqli_stmt_bind_param($st, "sssii ss s sii", $nombre, $paralelo, $periodo, $dia1, $dia2, $hi1, $hf1, $aula1, $docente_id, $uid);
+  } else {
+    mysqli_stmt_bind_param($st, "sssii s s s s ssii", $nombre, $paralelo, $periodo, $dia1, $dia2, $hi1, $hi2, $hf1, $hf2, $aula1, $docente_id, $uid);
+  }
+
+  if (!mysqli_stmt_execute($st)) {
+    $e = mysqli_stmt_error($st);
+    mysqli_stmt_close($st);
     fail($e ?: "no se pudo crear", 400);
   }
   $id = (int)mysqli_insert_id($enlace);
-  mysqli_stmt_close($stmt);
+  mysqli_stmt_close($st);
 
-  audit("cursos_create","cursos",$id,"creó curso $nombre $paralelo ($periodo)");
+  audit_safe("cursos_create","cursos",$id,"creó curso ".$nombre." ".$paralelo." (".$periodo.")");
   ok(["id"=>$id]);
 }
 
 if ($action === "cursos_update") {
-  require_active_user();
-  require_perm("cursos","editar");
+  $me = require_perm("cursos","editar");
   global $enlace;
 
   $id = (int)($body["id"] ?? 0);
-  $nombre = trim((string)($body["nombre"] ?? ""));
-  $paralelo = trim((string)($body["paralelo"] ?? "A"));
-  $periodo = trim((string)($body["periodo"] ?? ""));
-  $docente_id = array_key_exists("docente_id",$body) ? (($body["docente_id"]===""||$body["docente_id"]===null) ? null : (int)$body["docente_id"]) : null;
-  $dia = (int)($body["dia_semana"] ?? 1);
-  $hi = trim((string)($body["hora_inicio"] ?? "07:00"));
-  $hf = trim((string)($body["hora_fin"] ?? "08:00"));
-  $aula = trim((string)($body["aula"] ?? ""));
-
   if ($id<=0) fail("id inválido");
-  if ($nombre==="" || $periodo==="") fail("datos incompletos");
-  if ($dia < 1 || $dia > 7) fail("dia_semana inválido");
-  if (!preg_match('/^\d{2}:\d{2}$/', $hi) || !preg_match('/^\d{2}:\d{2}$/', $hf)) fail("hora inválida (HH:MM)");
-  if ($hi >= $hf) fail("hora_inicio debe ser menor que hora_fin");
 
-  $stmt = mysqli_prepare($enlace, "UPDATE cursos
-      SET nombre=?, paralelo=?, periodo=?, docente_id=?, dia_semana=?,
-          hora_inicio=STR_TO_DATE(?, '%H:%i'), hora_fin=STR_TO_DATE(?, '%H:%i'),
-          aula=?
-      WHERE id=?");
-  if (!$stmt) fail("error interno",500);
+  $sets = [];
+  $params = [];
+  $types = "";
 
-  mysqli_stmt_bind_param($stmt, "sssiiissi", $nombre,$paralelo,$periodo,$docente_id,$dia,$hi,$hf,$aula,$id);
-  if (!mysqli_stmt_execute($stmt)) {
-    $e = mysqli_stmt_error($stmt);
-    mysqli_stmt_close($stmt);
+  if (array_key_exists("nombre",$body)) { $sets[]="nombre=?"; $types.="s"; $params[]=trim((string)$body["nombre"]); }
+  if (array_key_exists("paralelo",$body)) { $sets[]="paralelo=?"; $types.="s"; $params[]=trim((string)$body["paralelo"]); }
+  if (array_key_exists("periodo",$body)) { $sets[]="periodo=?"; $types.="s"; $params[]=trim((string)$body["periodo"]); }
+
+  if (array_key_exists("dia_semana",$body)) { $sets[]="dia_semana=?"; $types.="i"; $params[]=(int)$body["dia_semana"]; }
+  if (array_key_exists("dia_semana2",$body)) {
+    $v = $body["dia_semana2"];
+    $v = ($v===""||$v===null) ? null : (int)$v;
+    $sets[]="dia_semana2=?";
+    $types.="i";
+    $params[]=$v;
+  }
+
+  if (array_key_exists("hora_inicio",$body)) { $sets[]="hora_inicio=STR_TO_DATE(?,'%H:%i')"; $types.="s"; $params[]=trim((string)$body["hora_inicio"]); }
+  if (array_key_exists("hora_fin",$body)) { $sets[]="hora_fin=STR_TO_DATE(?,'%H:%i')"; $types.="s"; $params[]=trim((string)$body["hora_fin"]); }
+
+  if (array_key_exists("hora_inicio2",$body)) {
+    $v = trim((string)$body["hora_inicio2"]);
+    if ($v==="") $sets[]="hora_inicio2=NULL";
+    else { $sets[]="hora_inicio2=STR_TO_DATE(?,'%H:%i')"; $types.="s"; $params[]=$v; }
+  }
+  if (array_key_exists("hora_fin2",$body)) {
+    $v = trim((string)$body["hora_fin2"]);
+    if ($v==="") $sets[]="hora_fin2=NULL";
+    else { $sets[]="hora_fin2=STR_TO_DATE(?,'%H:%i')"; $types.="s"; $params[]=$v; }
+  }
+
+  if (array_key_exists("aula",$body)) { $sets[]="aula=?"; $types.="s"; $params[]=trim((string)$body["aula"]); }
+  if (array_key_exists("docente_id",$body)) {
+    $v = $body["docente_id"];
+    $v = ($v===""||$v===null) ? null : (int)$v;
+    $sets[]="docente_id=?";
+    $types.="i";
+    $params[]=$v;
+  }
+  if (array_key_exists("activo",$body)) { $sets[]="activo=?"; $types.="i"; $params[]=(int)$body["activo"]; }
+
+  if (!$sets) fail("nada que actualizar");
+
+  $sql = "UPDATE cursos SET ".implode(",", $sets)." WHERE id=?";
+  $types .= "i";
+  $params[] = $id;
+
+  $st = mysqli_prepare($enlace, $sql);
+  mysqli_stmt_bind_param($st, $types, ...$params);
+  if (!mysqli_stmt_execute($st)) {
+    $e = mysqli_stmt_error($st);
+    mysqli_stmt_close($st);
     fail($e ?: "no se pudo actualizar", 400);
   }
-  mysqli_stmt_close($stmt);
+  mysqli_stmt_close($st);
 
-  audit("cursos_update","cursos",$id,"editó curso $id");
+  audit_safe("cursos_update","cursos",$id,"editó curso ".$id);
   ok();
 }
 
 if ($action === "cursos_delete") {
-  require_active_user();
-  require_perm("cursos","eliminar");
+  $me = require_perm("cursos","eliminar");
   global $enlace;
 
   $id = (int)($body["id"] ?? 0);
   if ($id<=0) fail("id inválido");
 
-  $stmt = mysqli_prepare($enlace, "UPDATE cursos SET activo=0 WHERE id=?");
-  if (!$stmt) fail("error interno",500);
-  mysqli_stmt_bind_param($stmt, "i", $id);
-  mysqli_stmt_execute($stmt);
-  mysqli_stmt_close($stmt);
+  $st = mysqli_prepare($enlace, "UPDATE cursos SET activo=0 WHERE id=?");
+  mysqli_stmt_bind_param($st, "i", $id);
+  if (!mysqli_stmt_execute($st)) {
+    $e = mysqli_stmt_error($st);
+    mysqli_stmt_close($st);
+    fail($e ?: "no se pudo desactivar", 400);
+  }
+  mysqli_stmt_close($st);
 
-  audit("cursos_delete","cursos",$id,"desactivó curso $id");
+  audit_safe("cursos_delete","cursos",$id,"desactivó curso ".$id);
   ok();
 }
 
-/* =========================
-   matriculas
-   choque horario por estudiante y periodo
-   ========================= */
+if ($action === "matriculas_list") {
+  $me = require_perm("matriculas","ver");
+  global $enlace;
+
+  $curso_id = (int)($_GET["curso_id"] ?? 0);
+  $estudiante_id = (int)($_GET["estudiante_id"] ?? 0);
+
+  $where = [];
+  $params = [];
+  $types = "";
+
+  if ($curso_id>0) { $where[]="m.curso_id=?"; $types.="i"; $params[]=$curso_id; }
+  if ($estudiante_id>0) { $where[]="m.estudiante_id=?"; $types.="i"; $params[]=$estudiante_id; }
+
+  $ws = $where ? ("WHERE ".implode(" AND ", $where)) : "";
+
+  $sql = "SELECT m.id,m.curso_id,m.estudiante_id,m.estado,m.fecha,
+                 c.nombre AS curso_nombre,c.paralelo,c.periodo,
+                 e.usuario AS estudiante_usuario, CONCAT(e.nombres,' ',e.apellidos) AS estudiante_nombre
+          FROM matriculas m
+          JOIN cursos c ON c.id=m.curso_id
+          JOIN usuarios e ON e.id=m.estudiante_id
+          $ws
+          ORDER BY m.id DESC";
+
+  $st = mysqli_prepare($enlace, $sql);
+  if ($types!=="") mysqli_stmt_bind_param($st, $types, ...$params);
+  mysqli_stmt_execute($st);
+  $rs = mysqli_stmt_get_result($st);
+
+  $out = [];
+  while ($row = mysqli_fetch_assoc($rs)) {
+    $row["id"] = (int)$row["id"];
+    $row["curso_id"] = (int)$row["curso_id"];
+    $row["estudiante_id"] = (int)$row["estudiante_id"];
+    $out[] = $row;
+  }
+  mysqli_stmt_close($st);
+  ok(["matriculas"=>$out]);
+}
 
 if ($action === "matriculas_create") {
-  require_active_user();
-  require_perm("matriculas","crear");
+  $me = require_perm("matriculas","crear");
   global $enlace;
 
   $curso_id = (int)($body["curso_id"] ?? 0);
   $estudiante_id = (int)($body["estudiante_id"] ?? 0);
   if ($curso_id<=0 || $estudiante_id<=0) fail("datos inválidos");
 
-  $st = mysqli_prepare($enlace, "SELECT r.nombre rol, u.activo
-                                FROM usuarios u LEFT JOIN roles r ON r.id=u.rol_id
-                                WHERE u.id=? LIMIT 1");
-  if (!$st) fail("error interno",500);
-  mysqli_stmt_bind_param($st, "i", $estudiante_id);
-  mysqli_stmt_execute($st);
-  $res = mysqli_stmt_get_result($st);
-  $urow = $res ? mysqli_fetch_assoc($res) : null;
-  mysqli_stmt_close($st);
-
-  if (!$urow) fail("estudiante no existe");
-  if ((int)$urow["activo"]!==1) fail("estudiante inactivo");
-  if (strtolower((string)$urow["rol"]) !== "estudiante") fail("el usuario no tiene rol estudiante");
-
-  $st = mysqli_prepare($enlace, "SELECT periodo,dia_semana,
-                                 TIME_FORMAT(hora_inicio,'%H:%i') hi,
-                                 TIME_FORMAT(hora_fin,'%H:%i') hf
-                                 FROM cursos WHERE id=? AND activo=1 LIMIT 1");
-  if (!$st) fail("error interno",500);
-  mysqli_stmt_bind_param($st, "i", $curso_id);
-  mysqli_stmt_execute($st);
-  $res = mysqli_stmt_get_result($st);
-  $crow = $res ? mysqli_fetch_assoc($res) : null;
-  mysqli_stmt_close($st);
-
-  if (!$crow) fail("curso no existe o está inactivo");
-
-  $periodo = (string)$crow["periodo"];
-  $dia = (int)$crow["dia_semana"];
-  $hi = (string)$crow["hi"];
-  $hf = (string)$crow["hf"];
-
-  $sql = "SELECT m.curso_id
-          FROM matriculas m
-          JOIN cursos c ON c.id=m.curso_id
-          WHERE m.estudiante_id=? AND m.estado='ACTIVA'
-            AND c.activo=1
-            AND c.periodo=?
-            AND c.dia_semana=?
-            AND NOT (TIME(c.hora_fin) <= STR_TO_DATE(?, '%H:%i')
-                     OR TIME(c.hora_inicio) >= STR_TO_DATE(?, '%H:%i'))
-          LIMIT 1";
-  $st = mysqli_prepare($enlace, $sql);
-  if (!$st) fail("error interno",500);
-  mysqli_stmt_bind_param($st, "isiss", $estudiante_id,$periodo,$dia,$hi,$hf);
-  mysqli_stmt_execute($st);
-  $res = mysqli_stmt_get_result($st);
-  $conf = $res ? mysqli_fetch_assoc($res) : null;
-  mysqli_stmt_close($st);
-
-  if ($conf) fail("choque de horario con otro curso en el mismo periodo", 409);
-
-  $st = mysqli_prepare($enlace, "INSERT INTO matriculas(curso_id,estudiante_id,estado) VALUES(?,?,'ACTIVA')
-                                 ON DUPLICATE KEY UPDATE estado='ACTIVA'");
-  if (!$st) fail("error interno",500);
-  mysqli_stmt_bind_param($st, "ii", $curso_id,$estudiante_id);
+  $st = mysqli_prepare($enlace, "INSERT INTO matriculas(curso_id,estudiante_id,estado) VALUES(?,?,'ACTIVA')");
+  mysqli_stmt_bind_param($st, "ii", $curso_id, $estudiante_id);
   if (!mysqli_stmt_execute($st)) {
     $e = mysqli_stmt_error($st);
     mysqli_stmt_close($st);
@@ -753,76 +833,96 @@ if ($action === "matriculas_create") {
   }
   mysqli_stmt_close($st);
 
-  audit("matriculas_create","matriculas",null,"matriculó estudiante $estudiante_id en curso $curso_id");
+  audit_safe("matriculas_create","matriculas",null,"matriculó estudiante ".$estudiante_id." en curso ".$curso_id);
   ok();
 }
 
 if ($action === "matriculas_anular") {
-  require_active_user();
-  require_perm("matriculas","anular");
+  $me = require_perm("matriculas","anular");
   global $enlace;
 
-  $curso_id = (int)($body["curso_id"] ?? 0);
-  $estudiante_id = (int)($body["estudiante_id"] ?? 0);
-  if ($curso_id<=0 || $estudiante_id<=0) fail("datos inválidos");
+  $id = (int)($body["id"] ?? 0);
+  if ($id<=0) fail("id inválido");
 
-  $st = mysqli_prepare($enlace, "UPDATE matriculas SET estado='RETIRADA' WHERE curso_id=? AND estudiante_id=?");
-  if (!$st) fail("error interno",500);
-  mysqli_stmt_bind_param($st, "ii", $curso_id,$estudiante_id);
-  mysqli_stmt_execute($st);
+  $st = mysqli_prepare($enlace, "UPDATE matriculas SET estado='ANULADA' WHERE id=?");
+  mysqli_stmt_bind_param($st, "i", $id);
+  if (!mysqli_stmt_execute($st)) {
+    $e = mysqli_stmt_error($st);
+    mysqli_stmt_close($st);
+    fail($e ?: "no se pudo anular", 400);
+  }
   mysqli_stmt_close($st);
 
-  audit("matriculas_anular","matriculas",null,"anuló matrícula estudiante $estudiante_id curso $curso_id");
+  audit_safe("matriculas_anular","matriculas",$id,"anuló matrícula ".$id);
   ok();
 }
 
-/* =========================
-   notas (docente)
-   ========================= */
-
 if ($action === "mis_cursos") {
   require_active_user();
-  require_perm("notas","ver");
+  $me = load_me();
   global $enlace;
 
-  $docente_id = (int)$_SESSION["usuario_id"];
-  $sql = "SELECT id,nombre,paralelo,periodo,dia_semana,
-                 TIME_FORMAT(hora_inicio,'%H:%i') hora_inicio,
-                 TIME_FORMAT(hora_fin,'%H:%i') hora_fin,
-                 aula
-          FROM cursos
-          WHERE activo=1 AND docente_id=?
-          ORDER BY periodo DESC, nombre ASC, paralelo ASC";
-  $st = mysqli_prepare($enlace, $sql);
-  if (!$st) fail("error interno",500);
-  mysqli_stmt_bind_param($st, "i", $docente_id);
+  $uid = (int)$me["id"];
+  $rol = strtolower((string)($me["rol"] ?? ""));
+
+  if ($rol === "docente") {
+    if (!has_perm($me, "cursos", "ver") && !has_perm($me, "notas", "ver")) fail("sin permisos", 403);
+    $st = mysqli_prepare($enlace, "SELECT id,nombre,paralelo,periodo,dia_semana,dia_semana2,hora_inicio,hora_inicio2,hora_fin,hora_fin2,aula,docente_id,activo
+                                 FROM cursos
+                                 WHERE activo=1 AND docente_id=?
+                                 ORDER BY id DESC");
+    mysqli_stmt_bind_param($st, "i", $uid);
+  } else {
+    $st = mysqli_prepare($enlace, "SELECT c.id,c.nombre,c.paralelo,c.periodo,c.dia_semana,c.dia_semana2,c.hora_inicio,c.hora_inicio2,c.hora_fin,c.hora_fin2,c.aula,c.docente_id,c.activo
+                                 FROM matriculas m
+                                 JOIN cursos c ON c.id=m.curso_id
+                                 WHERE m.estudiante_id=? AND m.estado='ACTIVA' AND c.activo=1
+                                 ORDER BY c.id DESC");
+    mysqli_stmt_bind_param($st, "i", $uid);
+  }
+
   mysqli_stmt_execute($st);
-  $res = mysqli_stmt_get_result($st);
-  $rows = [];
-  while ($res && ($row = mysqli_fetch_assoc($res))) $rows[] = $row;
+  $rs = mysqli_stmt_get_result($st);
+
+  $out = [];
+  while ($row = mysqli_fetch_assoc($rs)) {
+    $row["id"] = (int)$row["id"];
+    $row["dia_semana"] = (int)$row["dia_semana"];
+    $row["dia_semana2"] = $row["dia_semana2"]===null ? null : (int)$row["dia_semana2"];
+    $row["docente_id"] = $row["docente_id"]===null ? null : (int)$row["docente_id"];
+    $row["activo"] = (int)$row["activo"];
+    $row["hora_inicio"] = to_hm($row["hora_inicio"]);
+    $row["hora_fin"] = to_hm($row["hora_fin"]);
+    $row["hora_inicio2"] = to_hm($row["hora_inicio2"]);
+    $row["hora_fin2"] = to_hm($row["hora_fin2"]);
+    $out[] = $row;
+  }
   mysqli_stmt_close($st);
-  ok(["rows"=>$rows]);
+
+  ok(["cursos"=>$out]);
 }
 
 if ($action === "curso_estudiantes") {
-  require_active_user();
-  require_perm("notas","ver");
+  $me = require_perm("notas","ver");
   global $enlace;
 
   $curso_id = (int)($_GET["curso_id"] ?? 0);
   if ($curso_id<=0) fail("curso_id inválido");
 
-  $docente_id = (int)$_SESSION["usuario_id"];
-  $st = mysqli_prepare($enlace, "SELECT id FROM cursos WHERE id=? AND docente_id=? AND activo=1 LIMIT 1");
-  if (!$st) fail("error interno",500);
-  mysqli_stmt_bind_param($st, "ii", $curso_id,$docente_id);
-  mysqli_stmt_execute($st);
-  $res = mysqli_stmt_get_result($st);
-  $okc = $res ? mysqli_fetch_assoc($res) : null;
-  mysqli_stmt_close($st);
-  if (!$okc) fail("no autorizado",403);
+  $rol = strtolower((string)($me["rol"] ?? ""));
+  if ($rol === "docente") {
+    $stc = mysqli_prepare($enlace, "SELECT docente_id FROM cursos WHERE id=? AND activo=1 LIMIT 1");
+    mysqli_stmt_bind_param($stc, "i", $curso_id);
+    mysqli_stmt_execute($stc);
+    $rsc = mysqli_stmt_get_result($stc);
+    $c = mysqli_fetch_assoc($rsc) ?: null;
+    mysqli_stmt_close($stc);
+    if (!$c) fail("curso no existe", 404);
+    if ((int)$c["docente_id"] !== (int)$me["id"]) fail("solo tu curso", 403);
+  }
 
-  $sql = "SELECT u.id estudiante_id,u.usuario,u.nombres,u.apellidos,u.cedula,
+  $sql = "SELECT m.estudiante_id,
+                 u.usuario, CONCAT(u.nombres,' ',u.apellidos) AS nombre,
                  n.p1_deberes,n.p1_prueba,n.p1_lab,n.p1_examen,n.p1_total,
                  n.p2_deberes,n.p2_prueba,n.p2_lab,n.p2_examen,n.p2_total,
                  n.p3_deberes,n.p3_prueba,n.p3_lab,n.p3_examen,n.p3_total,
@@ -831,148 +931,181 @@ if ($action === "curso_estudiantes") {
           JOIN usuarios u ON u.id=m.estudiante_id
           LEFT JOIN notas n ON n.curso_id=m.curso_id AND n.estudiante_id=m.estudiante_id
           WHERE m.curso_id=? AND m.estado='ACTIVA'
-          ORDER BY u.apellidos ASC, u.nombres ASC";
+          ORDER BY u.apellidos,u.nombres";
+
   $st = mysqli_prepare($enlace, $sql);
-  if (!$st) fail("error interno",500);
   mysqli_stmt_bind_param($st, "i", $curso_id);
   mysqli_stmt_execute($st);
-  $res = mysqli_stmt_get_result($st);
-  $rows = [];
-  while ($res && ($row = mysqli_fetch_assoc($res))) $rows[] = $row;
-  mysqli_stmt_close($st);
+  $rs = mysqli_stmt_get_result($st);
 
-  ok(["rows"=>$rows]);
+  $out = [];
+  while ($row = mysqli_fetch_assoc($rs)) {
+    $row["estudiante_id"] = (int)$row["estudiante_id"];
+    $out[] = $row;
+  }
+  mysqli_stmt_close($st);
+  ok(["estudiantes"=>$out]);
 }
 
 if ($action === "guardar_notas") {
-  require_active_user();
-  require_perm("notas","editar");
+  $me = require_perm("notas","editar");
   global $enlace;
 
   $curso_id = (int)($body["curso_id"] ?? 0);
-  $items = $body["items"] ?? [];
+  $items = $body["items"] ?? null;
   if ($curso_id<=0 || !is_array($items)) fail("datos inválidos");
 
-  $docente_id = (int)$_SESSION["usuario_id"];
-  $st = mysqli_prepare($enlace, "SELECT id FROM cursos WHERE id=? AND docente_id=? AND activo=1 LIMIT 1");
-  if (!$st) fail("error interno",500);
-  mysqli_stmt_bind_param($st, "ii", $curso_id,$docente_id);
-  mysqli_stmt_execute($st);
-  $res = mysqli_stmt_get_result($st);
-  $okc = $res ? mysqli_fetch_assoc($res) : null;
-  mysqli_stmt_close($st);
-  if (!$okc) fail("no autorizado",403);
-
-  mysqli_begin_transaction($enlace);
-
-  $sql = "INSERT INTO notas(curso_id,estudiante_id,
-            p1_deberes,p1_prueba,p1_lab,p1_examen,
-            p2_deberes,p2_prueba,p2_lab,p2_examen,
-            p3_deberes,p3_prueba,p3_lab,p3_examen,
-            actualizado_por)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-          ON DUPLICATE KEY UPDATE
-            p1_deberes=VALUES(p1_deberes), p1_prueba=VALUES(p1_prueba), p1_lab=VALUES(p1_lab), p1_examen=VALUES(p1_examen),
-            p2_deberes=VALUES(p2_deberes), p2_prueba=VALUES(p2_prueba), p2_lab=VALUES(p2_lab), p2_examen=VALUES(p2_examen),
-            p3_deberes=VALUES(p3_deberes), p3_prueba=VALUES(p3_prueba), p3_lab=VALUES(p3_lab), p3_examen=VALUES(p3_examen),
-            actualizado_por=VALUES(actualizado_por)";
-  $st = mysqli_prepare($enlace, $sql);
-  if (!$st) { mysqli_rollback($enlace); fail("error interno",500); }
-
-  foreach ($items as $it) {
-    $eid = (int)($it["estudiante_id"] ?? 0);
-    if ($eid<=0) { mysqli_stmt_close($st); mysqli_rollback($enlace); fail("estudiante inválido"); }
-
-    $p1d = (float)($it["p1_deberes"] ?? 0);
-    $p1p = (float)($it["p1_prueba"] ?? 0);
-    $p1l = (float)($it["p1_lab"] ?? 0);
-    $p1e = (float)($it["p1_examen"] ?? 0);
-
-    $p2d = (float)($it["p2_deberes"] ?? 0);
-    $p2p = (float)($it["p2_prueba"] ?? 0);
-    $p2l = (float)($it["p2_lab"] ?? 0);
-    $p2e = (float)($it["p2_examen"] ?? 0);
-
-    $p3d = (float)($it["p3_deberes"] ?? 0);
-    $p3p = (float)($it["p3_prueba"] ?? 0);
-    $p3l = (float)($it["p3_lab"] ?? 0);
-    $p3e = (float)($it["p3_examen"] ?? 0);
-
-    mysqli_stmt_bind_param($st, "iidddddddddddddi",
-      $curso_id,$eid,
-      $p1d,$p1p,$p1l,$p1e,
-      $p2d,$p2p,$p2l,$p2e,
-      $p3d,$p3p,$p3l,$p3e,
-      $docente_id
-    );
-
-    if (!mysqli_stmt_execute($st)) {
-      $e = mysqli_stmt_error($st);
-      mysqli_stmt_close($st);
-      mysqli_rollback($enlace);
-      fail($e ?: "no se pudo guardar", 400);
-    }
+  $rol = strtolower((string)($me["rol"] ?? ""));
+  if ($rol === "docente") {
+    $stc = mysqli_prepare($enlace, "SELECT docente_id FROM cursos WHERE id=? AND activo=1 LIMIT 1");
+    mysqli_stmt_bind_param($stc, "i", $curso_id);
+    mysqli_stmt_execute($stc);
+    $rsc = mysqli_stmt_get_result($stc);
+    $c = mysqli_fetch_assoc($rsc) ?: null;
+    mysqli_stmt_close($stc);
+    if (!$c) fail("curso no existe", 404);
+    if ((int)$c["docente_id"] !== (int)$me["id"]) fail("solo tu curso", 403);
   }
 
-  mysqli_stmt_close($st);
-  mysqli_commit($enlace);
+  $uid = (int)$me["id"];
 
-  audit("notas_guardar","notas",$curso_id,"guardó notas curso $curso_id");
+  mysqli_begin_transaction($enlace);
+  try {
+    $sql = "INSERT INTO notas(
+              curso_id,estudiante_id,
+              p1_deberes,p1_prueba,p1_lab,p1_examen,
+              p2_deberes,p2_prueba,p2_lab,p2_examen,
+              p3_deberes,p3_prueba,p3_lab,p3_examen,
+              actualizado_por
+            ) VALUES(
+              ?,?,
+              ?,?,?,?,
+              ?,?,?,?,
+              ?,?,?,?,
+              ?
+            )
+            ON DUPLICATE KEY UPDATE
+              p1_deberes=VALUES(p1_deberes),
+              p1_prueba=VALUES(p1_prueba),
+              p1_lab=VALUES(p1_lab),
+              p1_examen=VALUES(p1_examen),
+              p2_deberes=VALUES(p2_deberes),
+              p2_prueba=VALUES(p2_prueba),
+              p2_lab=VALUES(p2_lab),
+              p2_examen=VALUES(p2_examen),
+              p3_deberes=VALUES(p3_deberes),
+              p3_prueba=VALUES(p3_prueba),
+              p3_lab=VALUES(p3_lab),
+              p3_examen=VALUES(p3_examen),
+              actualizado_por=VALUES(actualizado_por)";
+
+    $st = mysqli_prepare($enlace, $sql);
+
+    foreach ($items as $it) {
+      if (!is_array($it)) continue;
+      $estudiante_id = (int)($it["estudiante_id"] ?? 0);
+      if ($estudiante_id<=0) continue;
+
+      $p1d = (float)($it["p1_deberes"] ?? 0);
+      $p1p = (float)($it["p1_prueba"] ?? 0);
+      $p1l = (float)($it["p1_lab"] ?? 0);
+      $p1e = (float)($it["p1_examen"] ?? 0);
+
+      $p2d = (float)($it["p2_deberes"] ?? 0);
+      $p2p = (float)($it["p2_prueba"] ?? 0);
+      $p2l = (float)($it["p2_lab"] ?? 0);
+      $p2e = (float)($it["p2_examen"] ?? 0);
+
+      $p3d = (float)($it["p3_deberes"] ?? 0);
+      $p3p = (float)($it["p3_prueba"] ?? 0);
+      $p3l = (float)($it["p3_lab"] ?? 0);
+      $p3e = (float)($it["p3_examen"] ?? 0);
+
+      mysqli_stmt_bind_param(
+        $st,
+        "iidddddddddd ddi",
+        $curso_id, $estudiante_id,
+        $p1d,$p1p,$p1l,$p1e,
+        $p2d,$p2p,$p2l,$p2e,
+        $p3d,$p3p,$p3l,$p3e,
+        $uid
+      );
+      mysqli_stmt_execute($st);
+    }
+    mysqli_stmt_close($st);
+
+    mysqli_commit($enlace);
+  } catch (Throwable $t) {
+    mysqli_rollback($enlace);
+    fail("no se pudo guardar notas", 400);
+  }
+
+  audit_safe("notas_update","notas",$curso_id,"registró notas curso ".$curso_id);
   ok();
 }
 
-/* =========================
-   reportes (JSON)
-   ========================= */
-
 if ($action === "reporte_horario_docente") {
-  require_active_user();
-  require_perm("horarios","ver");
+  $me = require_perm("horarios","ver");
   global $enlace;
 
-  $docente_id = (int)$_SESSION["usuario_id"];
-  $sql = "SELECT id,nombre,paralelo,periodo,dia_semana,
-                 TIME_FORMAT(hora_inicio,'%H:%i') hora_inicio,
-                 TIME_FORMAT(hora_fin,'%H:%i') hora_fin,
-                 aula
-          FROM cursos
-          WHERE activo=1 AND docente_id=?
-          ORDER BY periodo DESC, dia_semana ASC, hora_inicio ASC";
+  $docente_id = (int)($_GET["docente_id"] ?? 0);
+  if ($docente_id<=0) fail("docente_id inválido");
+
+  $sql = "SELECT c.id,c.nombre,c.paralelo,c.periodo,c.dia_semana,c.dia_semana2,
+                 c.hora_inicio,c.hora_inicio2,c.hora_fin,c.hora_fin2,c.aula,c.activo
+          FROM cursos c
+          WHERE c.activo=1 AND c.docente_id=?
+          ORDER BY c.periodo DESC, c.dia_semana, c.hora_inicio";
+
   $st = mysqli_prepare($enlace, $sql);
-  if (!$st) fail("error interno",500);
   mysqli_stmt_bind_param($st, "i", $docente_id);
   mysqli_stmt_execute($st);
-  $res = mysqli_stmt_get_result($st);
-  $rows = [];
-  while ($res && ($row = mysqli_fetch_assoc($res))) $rows[] = $row;
+  $rs = mysqli_stmt_get_result($st);
+
+  $out = [];
+  while ($row = mysqli_fetch_assoc($rs)) {
+    $row["id"] = (int)$row["id"];
+    $row["dia_semana"] = (int)$row["dia_semana"];
+    $row["dia_semana2"] = $row["dia_semana2"]===null ? null : (int)$row["dia_semana2"];
+    $row["hora_inicio"] = to_hm($row["hora_inicio"]);
+    $row["hora_fin"] = to_hm($row["hora_fin"]);
+    $row["hora_inicio2"] = to_hm($row["hora_inicio2"]);
+    $row["hora_fin2"] = to_hm($row["hora_fin2"]);
+    $out[] = $row;
+  }
   mysqli_stmt_close($st);
-  ok(["rows"=>$rows]);
+  ok(["horario"=>$out]);
 }
 
 if ($action === "reporte_notas_estudiante") {
-  require_active_user();
-  require_perm("reportes","ver");
+  $me = require_perm("notas","ver");
   global $enlace;
 
-  $eid = (int)$_SESSION["usuario_id"];
+  $estudiante_id = (int)($_GET["estudiante_id"] ?? 0);
+  if ($estudiante_id<=0) fail("estudiante_id inválido");
 
-  $sql = "SELECT c.nombre,c.paralelo,c.periodo,
+  $rol = strtolower((string)($me["rol"] ?? ""));
+  if ($rol === "estudiante" || $rol === "usuario") {
+    if ((int)$me["id"] !== $estudiante_id) fail("solo tus notas", 403);
+  }
+
+  $sql = "SELECT c.periodo,c.nombre,c.paralelo,
                  n.p1_total,n.p2_total,n.p3_total,n.nota_final,n.estado
-          FROM matriculas m
-          JOIN cursos c ON c.id=m.curso_id
-          LEFT JOIN notas n ON n.curso_id=m.curso_id AND n.estudiante_id=m.estudiante_id
-          WHERE m.estudiante_id=? AND m.estado='ACTIVA' AND c.activo=1
-          ORDER BY c.periodo DESC, c.nombre ASC";
+          FROM notas n
+          JOIN cursos c ON c.id=n.curso_id
+          WHERE n.estudiante_id=?
+          ORDER BY c.periodo DESC, c.nombre";
+
   $st = mysqli_prepare($enlace, $sql);
-  if (!$st) fail("error interno",500);
-  mysqli_stmt_bind_param($st, "i", $eid);
+  mysqli_stmt_bind_param($st, "i", $estudiante_id);
   mysqli_stmt_execute($st);
-  $res = mysqli_stmt_get_result($st);
-  $rows = [];
-  while ($res && ($row = mysqli_fetch_assoc($res))) $rows[] = $row;
+  $rs = mysqli_stmt_get_result($st);
+
+  $out = [];
+  while ($row = mysqli_fetch_assoc($rs)) $out[] = $row;
   mysqli_stmt_close($st);
 
-  ok(["rows"=>$rows]);
+  ok(["notas"=>$out]);
 }
 
-fail("acción inválida", 404);
+fail("acción no válida", 404);
