@@ -6,7 +6,7 @@ function get_ip() {
     return $_SERVER["REMOTE_ADDR"] ?? "unknown";
 }
 
-function audit($accion, $tabla = null, $registro_id = null, $descripcion = "") {
+function auditoria($accion, $tabla = null, $registro_id = null, $descripcion = "") {
     global $enlace;
 
     $fecha = date("Y-m-d H:i:s");
@@ -35,4 +35,7 @@ function audit($accion, $tabla = null, $registro_id = null, $descripcion = "") {
     mysqli_stmt_execute($stmt);
     mysqli_stmt_close($stmt);
 }
-?>
+
+function audit($accion, $tabla = null, $registro_id = null, $descripcion = "") {
+    auditoria($accion, $tabla, $registro_id, $descripcion);
+}

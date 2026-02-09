@@ -1438,13 +1438,18 @@ async function viewNotas(me) {
             <label>mis cursos</label>
             <select id="n_curso" class="form-control select"></select>
           </div>
+          <div class="form-group">
+            <label>buscar estudiante</label>
+            <input type="text" id="nSearchInput" class="form-control" placeholder="nombre, cédula o usuario..." />
+            <span class="hint">filtra en tiempo real</span>
+          </div>
         </div>
 
         <div class="modal-actions" style="justify-content:flex-start; gap:10px;">
           <button class="btn btn-primary" id="btnGuardarNotas" type="button" ${canEdit ? "" : "disabled"}>guardar</button>
           <button class="btn btn-outline" id="btnRecargarNotas" type="button">recargar</button>
         </div>
-        <small class="hint">ingresa valores numéricos. se guardan por estudiante.</small>
+        <small class="hint">ingresa valores numéricos. se guardan por estudiante. <strong id="studentsCount"></strong></small>
       </div>
 
       <div class="table-container">
@@ -1464,6 +1469,10 @@ async function viewNotas(me) {
           </tbody>
         </table>
       </div>
+
+      <div class="pager-wrap">
+        <div id="nPagerContainer"></div>
+      </div>
     </div>
   `));
 
@@ -1481,21 +1490,62 @@ async function viewNotas(me) {
     return `<option value="${c.id}">${escapeHtml(label)}</option>`;
   }).join("") || `<option value="">sin cursos</option>`;
 
-  async function loadEstudiantes() {
-    const curso_id = Number(sel.value);
-    if (!curso_id) {
-      $("#nTableBody").innerHTML = `<tr><td colspan="6" class="td-center">sin curso</td></tr>`;
+  let allEstudiantes = [];
+  let currentPage = 1;
+  const perPage = 10;
+
+  function filterEstudiantes() {
+    const searchTerm = ($("#nSearchInput")?.value || "").toLowerCase().trim();
+    if (!searchTerm) return allEstudiantes;
+    
+    return allEstudiantes.filter(x => {
+      const nombre = `${x.apellidos || ""} ${x.nombres || ""}`.toLowerCase();
+      const usuario = (x.usuario || "").toLowerCase();
+      const cedula = (x.cedula || "").toLowerCase();
+      return nombre.includes(searchTerm) || usuario.includes(searchTerm) || cedula.includes(searchTerm);
+    });
+  }
+
+  function updateCount(filtered, total) {
+    const countEl = $("#studentsCount");
+    if (countEl) {
+      countEl.textContent = filtered === total ? 
+        `mostrando ${total} estudiantes` : 
+        `mostrando ${filtered} de ${total} estudiantes`;
+    }
+  }
+
+  // IMPORTANTE: Guardar cambios antes de cambiar de página
+  function saveCurrentPageEdits() {
+    $$("#nTableBody .n-inp").forEach(i => {
+      const eid = Number(i.dataset.e);
+      const k = i.dataset.k;
+      const v = Number(String(i.value).replace(",", "."));
+      
+      const estudiante = allEstudiantes.find(e => e.estudiante_id === eid);
+      if (estudiante) {
+        estudiante[k] = isNaN(v) ? 0 : v;
+      }
+    });
+  }
+
+  function renderEstudiantes() {
+    // Guardar ediciones de la página actual antes de renderizar
+    saveCurrentPageEdits();
+
+    const filtered = filterEstudiantes();
+    const { page, totalPages, slice } = paginate(filtered, currentPage, perPage);
+    currentPage = page;
+
+    updateCount(filtered.length, allEstudiantes.length);
+
+    if (!slice.length) {
+      $("#nTableBody").innerHTML = `<tr><td colspan="6" class="td-center">sin estudiantes encontrados</td></tr>`;
+      renderPager("#nPagerContainer", 1, 1, () => {});
       return;
     }
 
-    const r = await Api.curso_estudiantes(curso_id);
-    if (!r.ok) {
-      $("#nTableBody").innerHTML = `<tr><td colspan="6" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
-      return;
-    }
-
-    const rows = r.rows || r.data || [];
-    $("#nTableBody").innerHTML = rows.length ? rows.map(x => {
+    $("#nTableBody").innerHTML = slice.map(x => {
       const nombre = `${x.apellidos || ""} ${x.nombres || ""}`.trim() || x.usuario || ("#" + x.estudiante_id);
       const inpItem = (label, k, v) => `
         <div class="mini-item">
@@ -1534,19 +1584,63 @@ async function viewNotas(me) {
 
       return `
         <tr>
-          <td>${escapeHtml(nombre)}<br><small class="hint">id: ${escapeHtml(x.estudiante_id)}</small></td>
+          <td>
+            ${escapeHtml(nombre)}<br>
+            <small class="hint">cédula: ${escapeHtml(x.cedula || "-")} • id: ${escapeHtml(x.estudiante_id)}</small>
+          </td>
           <td>${p1}</td>
           <td>${p2}</td>
           <td>${p3}</td>
           <td>${escapeHtml(x.nota_final ?? "0.00")}</td>
-          <td>${escapeHtml(x.estado ?? "REPROBADO")}</td>
+          <td><span class="status-badge ${(x.estado === "APROBADO") ? "status-active" : "status-inactive"}">${escapeHtml(x.estado ?? "REPROBADO")}</span></td>
         </tr>
       `;
-    }).join("") : `<tr><td colspan="6" class="td-center">sin estudiantes matriculados</td></tr>`;
+    }).join("");
+
+    renderPager("#nPagerContainer", currentPage, totalPages, (p) => {
+      currentPage = p;
+      renderEstudiantes();
+    });
+  }
+
+  async function loadEstudiantes() {
+    const curso_id = Number(sel.value);
+    if (!curso_id) {
+      $("#nTableBody").innerHTML = `<tr><td colspan="6" class="td-center">sin curso</td></tr>`;
+      renderPager("#nPagerContainer", 1, 1, () => {});
+      updateCount(0, 0);
+      return;
+    }
+
+    const r = await Api.curso_estudiantes(curso_id);
+    if (!r.ok) {
+      $("#nTableBody").innerHTML = `<tr><td colspan="6" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
+      renderPager("#nPagerContainer", 1, 1, () => {});
+      updateCount(0, 0);
+      return;
+    }
+
+    allEstudiantes = r.rows || r.data || [];
+    currentPage = 1;
+    renderEstudiantes();
   }
 
   sel.onchange = loadEstudiantes;
   $("#btnRecargarNotas").onclick = loadEstudiantes;
+  
+  // Search with debounce
+  let searchTimeout;
+  const searchInput = $("#nSearchInput");
+  if (searchInput) {
+    searchInput.oninput = () => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => {
+        currentPage = 1;
+        renderEstudiantes();
+      }, 300);
+    };
+  }
+
   await loadEstudiantes();
 
   $("#btnGuardarNotas").onclick = async () => {
@@ -1555,23 +1649,32 @@ async function viewNotas(me) {
     const curso_id = Number(sel.value);
     if (!curso_id) return;
 
-    const itemsMap = new Map();
-    $$("#nTableBody .n-inp").forEach(i => {
-      const eid = Number(i.dataset.e);
-      const k = i.dataset.k;
-      const v = Number(String(i.value).replace(",", "."));
-      if (!itemsMap.has(eid)) itemsMap.set(eid, { estudiante_id: eid });
-      itemsMap.get(eid)[k] = isNaN(v) ? 0 : v;
-    });
+    // CRÍTICO: Guardar cambios de la página actual antes de enviar
+    saveCurrentPageEdits();
 
-    const items = Array.from(itemsMap.values());
+    // Preparar items para enviar al API
+    const items = allEstudiantes.map(est => ({
+      estudiante_id: est.estudiante_id,
+      p1_deberes: est.p1_deberes ?? 0,
+      p1_prueba: est.p1_prueba ?? 0,
+      p1_lab: est.p1_lab ?? 0,
+      p1_examen: est.p1_examen ?? 0,
+      p2_deberes: est.p2_deberes ?? 0,
+      p2_prueba: est.p2_prueba ?? 0,
+      p2_lab: est.p2_lab ?? 0,
+      p2_examen: est.p2_examen ?? 0,
+      p3_deberes: est.p3_deberes ?? 0,
+      p3_prueba: est.p3_prueba ?? 0,
+      p3_lab: est.p3_lab ?? 0,
+      p3_examen: est.p3_examen ?? 0
+    }));
+
     const rr = await Api.guardar_notas({ curso_id, items });
 
-    setMsg(rr.ok ? "notas guardadas" : (rr.error || "error"), rr.ok);
+    setMsg(rr.ok ? "notas guardadas correctamente" : (rr.error || "error"), rr.ok);
     if (rr.ok) await loadEstudiantes();
   };
 }
-
 /* =========================
    reportes
    ========================= */

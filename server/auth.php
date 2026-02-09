@@ -2,16 +2,23 @@
 require_once __DIR__ . "/session.php";
 require_once __DIR__ . "/conexion.php";
 
-function json_error($code, $msg) {
+function json_out($data, $code = 200) {
     http_response_code($code);
     header("Content-Type: application/json; charset=utf-8");
-    echo json_encode(["ok" => false, "error" => $msg], JSON_UNESCAPED_UNICODE);
+    echo json_encode($data, JSON_UNESCAPED_UNICODE);
     exit;
 }
 
 function require_login() {
     if (empty($_SESSION["usuario_id"])) {
-        json_error(401, "no autenticado");
+        json_out(["ok" => false, "error" => "no autenticado"], 401);
+    }
+}
+
+function require_admin() {
+    require_login();
+    if (!is_admin()) {
+        json_out(["ok" => false, "error" => "acceso denegado"], 403);
     }
 }
 
@@ -69,13 +76,13 @@ function can_any($mod) {
 
 function require_perm($mod, $acc) {
     if (!can($mod, $acc)) {
-        json_error(403, "acceso denegado");
+        json_out(["ok" => false, "error" => "acceso denegado"], 403);
     }
 }
 
 function require_perm_any($mod) {
     if (!can_any($mod)) {
-        json_error(403, "acceso denegado");
+        json_out(["ok" => false, "error" => "acceso denegado"], 403);
     }
 }
 
@@ -86,7 +93,7 @@ function require_active_user() {
     $uid = (int)$_SESSION["usuario_id"];
 
     $stmt = mysqli_prepare($enlace, "SELECT activo FROM usuarios WHERE id = ? LIMIT 1");
-    if (!$stmt) json_error(500, "error interno");
+    if (!$stmt) json_out(["ok" => false, "error" => "error interno"], 500);
 
     mysqli_stmt_bind_param($stmt, "i", $uid);
     mysqli_stmt_execute($stmt);
@@ -101,6 +108,6 @@ function require_active_user() {
             setcookie(session_name(), "", time() - 42000, $p["path"], $p["domain"], $p["secure"], $p["httponly"]);
         }
         session_destroy();
-        json_error(401, "usuario inactivo");
+        json_out(["ok" => false, "error" => "usuario inactivo"], 401);
     }
 }
