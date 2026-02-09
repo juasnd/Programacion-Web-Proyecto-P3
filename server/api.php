@@ -785,17 +785,47 @@ if ($action === "mis_cursos") {
   require_perm("notas","ver");
   global $enlace;
 
-  $docente_id = (int)$_SESSION["usuario_id"];
-  $sql = "SELECT id,nombre,paralelo,periodo,dia_semana,
-                 TIME_FORMAT(hora_inicio,'%H:%i') hora_inicio,
-                 TIME_FORMAT(hora_fin,'%H:%i') hora_fin,
-                 aula
-          FROM cursos
-          WHERE activo=1 AND docente_id=?
-          ORDER BY periodo DESC, nombre ASC, paralelo ASC";
-  $st = mysqli_prepare($enlace, $sql);
-  if (!$st) fail("error interno",500);
-  mysqli_stmt_bind_param($st, "i", $docente_id);
+  // docente: solo sus cursos. admin: puede ver todos los cursos activos
+  // (y opcionalmente filtrar por docente_id vía querystring)
+  $isAdmin = is_admin();
+  $docente_id = $isAdmin ? (int)($_GET["docente_id"] ?? 0) : (int)$_SESSION["usuario_id"];
+
+  if ($isAdmin && $docente_id > 0) {
+    $sql = "SELECT id,nombre,paralelo,periodo,dia_semana,
+                   TIME_FORMAT(hora_inicio,'%H:%i') hora_inicio,
+                   TIME_FORMAT(hora_fin,'%H:%i') hora_fin,
+                   aula,
+                   docente_id
+            FROM cursos
+            WHERE activo=1 AND docente_id=?
+            ORDER BY periodo DESC, nombre ASC, paralelo ASC";
+    $st = mysqli_prepare($enlace, $sql);
+    if (!$st) fail("error interno",500);
+    mysqli_stmt_bind_param($st, "i", $docente_id);
+  } else if ($isAdmin) {
+    $sql = "SELECT id,nombre,paralelo,periodo,dia_semana,
+                   TIME_FORMAT(hora_inicio,'%H:%i') hora_inicio,
+                   TIME_FORMAT(hora_fin,'%H:%i') hora_fin,
+                   aula,
+                   docente_id
+            FROM cursos
+            WHERE activo=1
+            ORDER BY periodo DESC, nombre ASC, paralelo ASC";
+    $st = mysqli_prepare($enlace, $sql);
+    if (!$st) fail("error interno",500);
+  } else {
+    $sql = "SELECT id,nombre,paralelo,periodo,dia_semana,
+                   TIME_FORMAT(hora_inicio,'%H:%i') hora_inicio,
+                   TIME_FORMAT(hora_fin,'%H:%i') hora_fin,
+                   aula
+            FROM cursos
+            WHERE activo=1 AND docente_id=?
+            ORDER BY periodo DESC, nombre ASC, paralelo ASC";
+    $st = mysqli_prepare($enlace, $sql);
+    if (!$st) fail("error interno",500);
+    mysqli_stmt_bind_param($st, "i", $docente_id);
+  }
+
   mysqli_stmt_execute($st);
   $res = mysqli_stmt_get_result($st);
   $rows = [];
@@ -812,15 +842,28 @@ if ($action === "curso_estudiantes") {
   $curso_id = (int)($_GET["curso_id"] ?? 0);
   if ($curso_id<=0) fail("curso_id inválido");
 
-  $docente_id = (int)$_SESSION["usuario_id"];
-  $st = mysqli_prepare($enlace, "SELECT id FROM cursos WHERE id=? AND docente_id=? AND activo=1 LIMIT 1");
-  if (!$st) fail("error interno",500);
-  mysqli_stmt_bind_param($st, "ii", $curso_id,$docente_id);
-  mysqli_stmt_execute($st);
-  $res = mysqli_stmt_get_result($st);
-  $okc = $res ? mysqli_fetch_assoc($res) : null;
-  mysqli_stmt_close($st);
-  if (!$okc) fail("no autorizado",403);
+  // docente solo puede ver estudiantes de sus cursos.
+  // admin puede ver cualquier curso activo.
+  if (!is_admin()) {
+    $docente_id = (int)$_SESSION["usuario_id"];
+    $st = mysqli_prepare($enlace, "SELECT id FROM cursos WHERE id=? AND docente_id=? AND activo=1 LIMIT 1");
+    if (!$st) fail("error interno",500);
+    mysqli_stmt_bind_param($st, "ii", $curso_id,$docente_id);
+    mysqli_stmt_execute($st);
+    $res = mysqli_stmt_get_result($st);
+    $okc = $res ? mysqli_fetch_assoc($res) : null;
+    mysqli_stmt_close($st);
+    if (!$okc) fail("no autorizado",403);
+  } else {
+    $st = mysqli_prepare($enlace, "SELECT id FROM cursos WHERE id=? AND activo=1 LIMIT 1");
+    if (!$st) fail("error interno",500);
+    mysqli_stmt_bind_param($st, "i", $curso_id);
+    mysqli_stmt_execute($st);
+    $res = mysqli_stmt_get_result($st);
+    $okc = $res ? mysqli_fetch_assoc($res) : null;
+    mysqli_stmt_close($st);
+    if (!$okc) fail("curso no existe o inactivo",404);
+  }
 
   $sql = "SELECT u.id estudiante_id,u.usuario,u.nombres,u.apellidos,u.cedula,
                  n.p1_deberes,n.p1_prueba,n.p1_lab,n.p1_examen,n.p1_total,
@@ -853,15 +896,28 @@ if ($action === "guardar_notas") {
   $items = $body["items"] ?? [];
   if ($curso_id<=0 || !is_array($items)) fail("datos inválidos");
 
-  $docente_id = (int)$_SESSION["usuario_id"];
-  $st = mysqli_prepare($enlace, "SELECT id FROM cursos WHERE id=? AND docente_id=? AND activo=1 LIMIT 1");
-  if (!$st) fail("error interno",500);
-  mysqli_stmt_bind_param($st, "ii", $curso_id,$docente_id);
-  mysqli_stmt_execute($st);
-  $res = mysqli_stmt_get_result($st);
-  $okc = $res ? mysqli_fetch_assoc($res) : null;
-  mysqli_stmt_close($st);
-  if (!$okc) fail("no autorizado",403);
+  // docente solo puede guardar en sus cursos.
+  // admin puede guardar en cualquier curso activo.
+  $docente_id = (int)$_SESSION["usuario_id"]; // actualizado_por
+  if (!is_admin()) {
+    $st = mysqli_prepare($enlace, "SELECT id FROM cursos WHERE id=? AND docente_id=? AND activo=1 LIMIT 1");
+    if (!$st) fail("error interno",500);
+    mysqli_stmt_bind_param($st, "ii", $curso_id,$docente_id);
+    mysqli_stmt_execute($st);
+    $res = mysqli_stmt_get_result($st);
+    $okc = $res ? mysqli_fetch_assoc($res) : null;
+    mysqli_stmt_close($st);
+    if (!$okc) fail("no autorizado",403);
+  } else {
+    $st = mysqli_prepare($enlace, "SELECT id FROM cursos WHERE id=? AND activo=1 LIMIT 1");
+    if (!$st) fail("error interno",500);
+    mysqli_stmt_bind_param($st, "i", $curso_id);
+    mysqli_stmt_execute($st);
+    $res = mysqli_stmt_get_result($st);
+    $okc = $res ? mysqli_fetch_assoc($res) : null;
+    mysqli_stmt_close($st);
+    if (!$okc) fail("curso no existe o inactivo",404);
+  }
 
   mysqli_begin_transaction($enlace);
 
