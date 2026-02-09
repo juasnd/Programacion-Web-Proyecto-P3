@@ -1272,6 +1272,22 @@ async function viewMatriculas(me) {
 
         <small class="hint">valida choque de horario en el mismo periodo.</small>
       </div>
+
+      <div class="table-container" style="margin-top: 1rem;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px;">
+          <h3 style="margin:0;">horario del estudiante (matrículas activas)</h3>
+          <button class="btn btn-outline" id="btnVerHorarioEst" type="button">actualizar horario</button>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>periodo</th><th>curso</th><th>paralelo</th><th>día</th><th>hora</th><th>aula</th><th>docente</th>
+            </tr>
+          </thead>
+          <tbody id="mHorarioBody"><tr><td colspan="7" class="td-center">elige un estudiante</td></tr></tbody>
+        </table>
+        <div id="mChoques" style="margin-top:10px;"></div>
+      </div>
     </div>
   `));
 
@@ -1303,6 +1319,9 @@ async function viewMatriculas(me) {
   }
 
   await loadEstudiantes(false);
+  const getSelectedEstudianteId = () => Number($("#m_est_sel")?.value || 0);
+
+  await refreshHorario();
 
   $("#btnRefEst").onclick = async () => {
     USERS_CACHE.loaded = false;
@@ -1310,7 +1329,68 @@ async function viewMatriculas(me) {
     setMsg("estudiantes recargados", true);
   };
 
-  const getSelectedEstudianteId = () => Number($("#m_est_sel")?.value || 0);
+  function detectarChoques(rows) {
+    // choque si mismo periodo + mismo día + traslape de horas
+    const choques = [];
+    for (let i=0; i<rows.length; i++) {
+      for (let j=i+1; j<rows.length; j++) {
+        const a = rows[i], b = rows[j];
+        if (String(a.periodo) !== String(b.periodo)) continue;
+        if (Number(a.dia_semana) !== Number(b.dia_semana)) continue;
+        const a1 = String(a.hora_inicio||"");
+        const a2 = String(a.hora_fin||"");
+        const b1 = String(b.hora_inicio||"");
+        const b2 = String(b.hora_fin||"");
+        if (a1 < b2 && b1 < a2) {
+          choques.push([a,b]);
+        }
+      }
+    }
+    return choques;
+  }
+
+  async function refreshHorario() {
+    const estudiante_id = getSelectedEstudianteId();
+    const body = $("#mHorarioBody");
+    const msg = $("#mChoques");
+    if (!body) return;
+
+    if (!estudiante_id) {
+      body.innerHTML = `<tr><td colspan="7" class="td-center">elige un estudiante</td></tr>`;
+      if (msg) msg.innerHTML = "";
+      return;
+    }
+
+    const r = await Api.matriculas_list_estudiante(estudiante_id);
+    if (!r.ok) {
+      body.innerHTML = `<tr><td colspan="7" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
+      if (msg) msg.innerHTML = "";
+      return;
+    }
+
+    const rows = r.rows || r.data || [];
+    body.innerHTML = rows.length ? rows.map(x => `
+      <tr>
+        <td>${escapeHtml(x.periodo)}</td>
+        <td>${escapeHtml(x.nombre)}</td>
+        <td>${escapeHtml(x.paralelo)}</td>
+        <td>${escapeHtml(diaNombre(x.dia_semana))}</td>
+        <td>${escapeHtml(x.hora_inicio)}-${escapeHtml(x.hora_fin)}</td>
+        <td>${escapeHtml(x.aula || "-")}</td>
+        <td>${escapeHtml((x.docente_nombre || "").trim() || "-")}</td>
+      </tr>
+    `).join("") : `<tr><td colspan="7" class="td-center">sin matrículas activas</td></tr>`;
+
+    const choques = detectarChoques(rows);
+    if (msg) {
+      msg.innerHTML = choques.length
+        ? msgBox("info", `ojo: se detectaron ${choques.length} choque(s) de horario (mismo periodo y día con traslape).`)
+        : "";
+    }
+  }
+
+  $("#m_est_sel").onchange = refreshHorario;
+  if ($("#btnVerHorarioEst")) $("#btnVerHorarioEst").onclick = refreshHorario;
 
   $("#btnMatricular").onclick = async () => {
     if (!canCreate) return;
@@ -1322,6 +1402,7 @@ async function viewMatriculas(me) {
 
     const rr = await Api.matriculas_create({ curso_id, estudiante_id });
     setMsg(rr.ok ? "matrícula registrada" : (rr.error || "error"), rr.ok);
+    if (rr.ok) await refreshHorario();
   };
 
   $("#btnAnular").onclick = async () => {
@@ -1334,6 +1415,7 @@ async function viewMatriculas(me) {
 
     const rr = await Api.matriculas_anular({ curso_id, estudiante_id });
     setMsg(rr.ok ? "matrícula anulada" : (rr.error || "error"), rr.ok);
+    if (rr.ok) await refreshHorario();
   };
 }
 
@@ -1415,26 +1497,37 @@ async function viewNotas(me) {
     const rows = r.rows || r.data || [];
     $("#nTableBody").innerHTML = rows.length ? rows.map(x => {
       const nombre = `${x.apellidos || ""} ${x.nombres || ""}`.trim() || x.usuario || ("#" + x.estudiante_id);
-      const inp = (k, v) => `<input class="form-control n-inp" data-e="${x.estudiante_id}" data-k="${k}" value="${escapeHtml(v ?? 0)}" />`;
+      const inpItem = (label, k, v) => `
+        <div class="mini-item">
+          <small class="mini-label">${escapeHtml(label)}</small>
+          <input class="form-control n-inp" data-e="${x.estudiante_id}" data-k="${k}" value="${escapeHtml(v ?? 0)}" />
+        </div>
+      `;
 
       const p1 = `
         <div class="mini-grid">
-          ${inp("p1_deberes", x.p1_deberes)} ${inp("p1_prueba", x.p1_prueba)}
-          ${inp("p1_lab", x.p1_lab)} ${inp("p1_examen", x.p1_examen)}
+          ${inpItem("deberes", "p1_deberes", x.p1_deberes)}
+          ${inpItem("prueba",  "p1_prueba",  x.p1_prueba)}
+          ${inpItem("lab",     "p1_lab",     x.p1_lab)}
+          ${inpItem("examen",  "p1_examen",  x.p1_examen)}
         </div>
         <small class="hint">total: ${escapeHtml(x.p1_total ?? "0.00")}</small>
       `;
       const p2 = `
         <div class="mini-grid">
-          ${inp("p2_deberes", x.p2_deberes)} ${inp("p2_prueba", x.p2_prueba)}
-          ${inp("p2_lab", x.p2_lab)} ${inp("p2_examen", x.p2_examen)}
+          ${inpItem("deberes", "p2_deberes", x.p2_deberes)}
+          ${inpItem("prueba",  "p2_prueba",  x.p2_prueba)}
+          ${inpItem("lab",     "p2_lab",     x.p2_lab)}
+          ${inpItem("examen",  "p2_examen",  x.p2_examen)}
         </div>
         <small class="hint">total: ${escapeHtml(x.p2_total ?? "0.00")}</small>
       `;
       const p3 = `
         <div class="mini-grid">
-          ${inp("p3_deberes", x.p3_deberes)} ${inp("p3_prueba", x.p3_prueba)}
-          ${inp("p3_lab", x.p3_lab)} ${inp("p3_examen", x.p3_examen)}
+          ${inpItem("deberes", "p3_deberes", x.p3_deberes)}
+          ${inpItem("prueba",  "p3_prueba",  x.p3_prueba)}
+          ${inpItem("lab",     "p3_lab",     x.p3_lab)}
+          ${inpItem("examen",  "p3_examen",  x.p3_examen)}
         </div>
         <small class="hint">total: ${escapeHtml(x.p3_total ?? "0.00")}</small>
       `;

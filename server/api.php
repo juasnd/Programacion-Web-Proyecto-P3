@@ -588,7 +588,11 @@ if ($action === "cursos_create") {
   $nombre = trim((string)($body["nombre"] ?? ""));
   $paralelo = trim((string)($body["paralelo"] ?? "A"));
   $periodo = trim((string)($body["periodo"] ?? ""));
-  $docente_id = array_key_exists("docente_id",$body) ? (($body["docente_id"]===""||$body["docente_id"]===null) ? null : (int)$body["docente_id"]) : null;
+
+  // docente es opcional: si no viene, guardamos NULL (no 0)
+  $docente_id_raw = array_key_exists("docente_id",$body) ? $body["docente_id"] : null;
+  $docente_id = ($docente_id_raw === "" || $docente_id_raw === null) ? 0 : (int)$docente_id_raw;
+
   $dia = (int)($body["dia_semana"] ?? 1);
   $hi = trim((string)($body["hora_inicio"] ?? "07:00"));
   $hf = trim((string)($body["hora_fin"] ?? "08:00"));
@@ -601,11 +605,12 @@ if ($action === "cursos_create") {
 
   $uid = (int)$_SESSION["usuario_id"];
 
+  // NULLIF(?,0) evita que mysqli convierta NULL a 0 y rompa la FK de docente_id
   $stmt = mysqli_prepare($enlace, "INSERT INTO cursos(nombre,paralelo,periodo,docente_id,dia_semana,hora_inicio,hora_fin,aula,creado_por,activo)
-                                   VALUES(?,?,?,?,?,STR_TO_DATE(?, '%H:%i'),STR_TO_DATE(?, '%H:%i'),?,?,1)");
+                                   VALUES(?,?,?,NULLIF(?,0),?,CAST(? AS TIME),CAST(? AS TIME),?,?,1)");
   if (!$stmt) fail("error interno",500);
 
-  mysqli_stmt_bind_param($stmt, "sssiiissii", $nombre,$paralelo,$periodo,$docente_id,$dia,$hi,$hf,$aula,$uid);
+  mysqli_stmt_bind_param($stmt, "sssiisssi", $nombre,$paralelo,$periodo,$docente_id,$dia,$hi,$hf,$aula,$uid);
   if (!mysqli_stmt_execute($stmt)) {
     $e = mysqli_stmt_error($stmt);
     mysqli_stmt_close($stmt);
@@ -627,7 +632,10 @@ if ($action === "cursos_update") {
   $nombre = trim((string)($body["nombre"] ?? ""));
   $paralelo = trim((string)($body["paralelo"] ?? "A"));
   $periodo = trim((string)($body["periodo"] ?? ""));
-  $docente_id = array_key_exists("docente_id",$body) ? (($body["docente_id"]===""||$body["docente_id"]===null) ? null : (int)$body["docente_id"]) : null;
+
+  $docente_id_raw = array_key_exists("docente_id",$body) ? $body["docente_id"] : null;
+  $docente_id = ($docente_id_raw === "" || $docente_id_raw === null) ? 0 : (int)$docente_id_raw;
+
   $dia = (int)($body["dia_semana"] ?? 1);
   $hi = trim((string)($body["hora_inicio"] ?? "07:00"));
   $hf = trim((string)($body["hora_fin"] ?? "08:00"));
@@ -640,13 +648,13 @@ if ($action === "cursos_update") {
   if ($hi >= $hf) fail("hora_inicio debe ser menor que hora_fin");
 
   $stmt = mysqli_prepare($enlace, "UPDATE cursos
-      SET nombre=?, paralelo=?, periodo=?, docente_id=?, dia_semana=?,
-          hora_inicio=STR_TO_DATE(?, '%H:%i'), hora_fin=STR_TO_DATE(?, '%H:%i'),
+      SET nombre=?, paralelo=?, periodo=?, docente_id=NULLIF(?,0), dia_semana=?,
+          hora_inicio=CAST(? AS TIME), hora_fin=CAST(? AS TIME),
           aula=?
       WHERE id=?");
   if (!$stmt) fail("error interno",500);
 
-  mysqli_stmt_bind_param($stmt, "sssiiissi", $nombre,$paralelo,$periodo,$docente_id,$dia,$hi,$hf,$aula,$id);
+  mysqli_stmt_bind_param($stmt, "sssiisssi", $nombre,$paralelo,$periodo,$docente_id,$dia,$hi,$hf,$aula,$id);
   if (!mysqli_stmt_execute($stmt)) {
     $e = mysqli_stmt_error($stmt);
     mysqli_stmt_close($stmt);
@@ -774,6 +782,38 @@ if ($action === "matriculas_anular") {
 
   audit("matriculas_anular","matriculas",null,"anuló matrícula estudiante $estudiante_id curso $curso_id");
   ok();
+}
+
+
+if ($action === "matriculas_list_estudiante") {
+  require_active_user();
+  // para ver el horario mientras matriculas (secretaria/admin/docente). Requiere permiso de matriculas.
+  require_perm("matriculas","crear");
+  global $enlace;
+
+  $estudiante_id = (int)($_GET["estudiante_id"] ?? 0);
+  if ($estudiante_id<=0) fail("estudiante_id inválido");
+
+  $sql = "SELECT m.curso_id, c.nombre, c.paralelo, c.periodo, c.dia_semana,
+                 TIME_FORMAT(c.hora_inicio,'%H:%i') hora_inicio,
+                 TIME_FORMAT(c.hora_fin,'%H:%i') hora_fin,
+                 c.aula,
+                 CONCAT(IFNULL(u.nombres,''),' ',IFNULL(u.apellidos,'')) AS docente_nombre
+          FROM matriculas m
+          JOIN cursos c ON c.id=m.curso_id
+          LEFT JOIN usuarios u ON u.id=c.docente_id
+          WHERE m.estudiante_id=? AND m.estado='ACTIVA' AND c.activo=1
+          ORDER BY c.periodo DESC, c.dia_semana ASC, c.hora_inicio ASC";
+  $st = mysqli_prepare($enlace, $sql);
+  if (!$st) fail("error interno",500);
+  mysqli_stmt_bind_param($st, "i", $estudiante_id);
+  mysqli_stmt_execute($st);
+  $res = mysqli_stmt_get_result($st);
+  $rows = [];
+  while ($res && ($row = mysqli_fetch_assoc($res))) $rows[] = $row;
+  mysqli_stmt_close($st);
+
+  ok(["rows"=>$rows]);
 }
 
 /* =========================
