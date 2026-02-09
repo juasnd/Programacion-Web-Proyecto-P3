@@ -1,12 +1,7 @@
 const Api = (() => {
-  // ajusta esta ruta a donde está tu api.php
-  // ejemplos:
-  // const BASE = "./server/api.php";
-  // const BASE = "./index.php?api=1";
-  const BASE = "./server/api.php";
+  const BASE = "./index.php?api=1";
 
   async function req(action, method = "GET", data) {
-    const url = `${BASE}?action=${encodeURIComponent(action)}`;
     const opts = {
       method,
       credentials: "include",
@@ -15,22 +10,7 @@ const Api = (() => {
     };
     if (method !== "GET") opts.body = JSON.stringify(data ?? {});
 
-    const r = await fetch(url, opts);
-    const j = await r.json().catch(() => null);
-    if (!j) return { ok: false, error: "respuesta inválida" };
-    return j;
-  }
-
-  async function getWithQS(action, qs = {}) {
-    const u = new URL(BASE, window.location.href);
-    u.searchParams.set("action", action);
-    Object.entries(qs).forEach(([k, v]) => u.searchParams.set(k, v));
-    const r = await fetch(u.toString(), {
-      method: "GET",
-      credentials: "include",
-      cache: "no-store",
-      headers: { "Content-Type": "application/json" },
-    });
+    const r = await fetch(`${BASE}&action=${encodeURIComponent(action)}`, opts);
     const j = await r.json().catch(() => null);
     if (!j) return { ok: false, error: "respuesta inválida" };
     return j;
@@ -53,21 +33,20 @@ const Api = (() => {
 
     permisos_get: () => req("permisos_get"),
     permisos_set: (p) => req("permisos_set", "POST", p),
-
     cursos_list: () => req("cursos_list"),
-    cursos_create: (p) => req("cursos_create", "POST", p),
-    cursos_update: (p) => req("cursos_update", "POST", p),
-    cursos_delete: (p) => req("cursos_delete", "POST", p),
+cursos_create: (p) => req("cursos_create","POST",p),
+cursos_update: (p) => req("cursos_update","POST",p),
+cursos_delete: (p) => req("cursos_delete","POST",p),
 
-    matriculas_create: (p) => req("matriculas_create", "POST", p),
-    matriculas_anular: (p) => req("matriculas_anular", "POST", p),
-    matriculas_list_estudiante: (estudiante_id) => getWithQS("matriculas_list_estudiante", { estudiante_id }),
+matriculas_create: (p) => req("matriculas_create","POST",p),
+matriculas_anular: (p) => req("matriculas_anular","POST",p),
 
-    mis_cursos: () => req("mis_cursos"),
-    curso_estudiantes: (curso_id) => getWithQS("curso_estudiantes", { curso_id }),
-    guardar_notas: (p) => req("guardar_notas", "POST", p),
+mis_cursos: () => req("mis_cursos"),
+curso_estudiantes: (curso_id) => req(`curso_estudiantes&curso_id=${encodeURIComponent(curso_id)}`),
+guardar_notas: (p) => req("guardar_notas","POST",p),
 
-    reporte_horario_docente: () => req("reporte_horario_docente"),
-    reporte_notas_estudiante: () => req("reporte_notas_estudiante"),
+reporte_horario_docente: () => req("reporte_horario_docente"),
+reporte_notas_estudiante: () => req("reporte_notas_estudiante"),
+
   };
 })();
