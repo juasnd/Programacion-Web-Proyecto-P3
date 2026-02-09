@@ -1423,7 +1423,7 @@ async function viewMatriculas(me) {
    notas (docente)
    ========================= */
 async function viewNotas(me) {
-  if (!hasAnyPerm(me, "notas")) { location.hash="#dashboard"; return router(); }
+  if (!hasAnyPerm(me, "notas")) { location.hash = "#dashboard"; return router(); }
 
   const canEdit = hasPerm(me, "notas", "editar");
 
@@ -1457,9 +1457,9 @@ async function viewNotas(me) {
           <thead>
             <tr>
               <th>estudiante</th>
-              <th>p1 (4/5/4/7)</th>
-              <th>p2 (4/5/4/7)</th>
-              <th>p3 (4/5/4/7)</th>
+              <th>p1</th>
+              <th>p2</th>
+              <th>p3</th>
               <th>final</th>
               <th>estado</th>
             </tr>
@@ -1470,7 +1470,7 @@ async function viewNotas(me) {
         </table>
       </div>
 
-      <div class="pager-wrap">
+      <div class="pager-wrap" style="margin-top:12px;">
         <div id="nPagerContainer"></div>
       </div>
     </div>
@@ -1479,8 +1479,35 @@ async function viewNotas(me) {
   $("#btnLogout").onclick = logoutTotal;
   startClock();
 
-  const setMsg = (t, okk=false) => { $("#nMsg").innerHTML = msgBox(okk ? "success" : "info", t); };
+  const setMsg = (t, okk = false) => {
+    $("#nMsg").innerHTML = msgBox(okk ? "success" : "info", t);
+  };
 
+  // pager visible (anterior/siguiente)
+  function renderPagerSimple(containerSel, page, totalPages, onPage) {
+    const el = $(containerSel);
+    if (!el) return;
+
+    const disabledPrev = page <= 1 ? "disabled" : "";
+    const disabledNext = page >= totalPages ? "disabled" : "";
+
+    el.innerHTML = `
+      <div class="pager" style="display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap;">
+        <button class="btn btn-outline" id="nPrevBtn" type="button" ${disabledPrev}>anterior</button>
+        <span class="hint" style="min-width:140px; text-align:center;">
+          página <strong>${page}</strong> de <strong>${totalPages}</strong>
+        </span>
+        <button class="btn btn-outline" id="nNextBtn" type="button" ${disabledNext}>siguiente</button>
+      </div>
+    `;
+
+    const prevBtn = $("#nPrevBtn");
+    const nextBtn = $("#nNextBtn");
+    if (prevBtn) prevBtn.onclick = () => { if (page > 1) onPage(page - 1); };
+    if (nextBtn) nextBtn.onclick = () => { if (page < totalPages) onPage(page + 1); };
+  }
+
+  // cargar cursos
   const cursosRes = await Api.mis_cursos();
   const cursos = cursosRes.ok ? (cursosRes.rows || cursosRes.data || []) : [];
   const sel = $("#n_curso");
@@ -1492,12 +1519,12 @@ async function viewNotas(me) {
 
   let allEstudiantes = [];
   let currentPage = 1;
-  const perPage = 10;
+  const perPage = 2; // ✅ 2 estudiantes por página
 
   function filterEstudiantes() {
     const searchTerm = ($("#nSearchInput")?.value || "").toLowerCase().trim();
     if (!searchTerm) return allEstudiantes;
-    
+
     return allEstudiantes.filter(x => {
       const nombre = `${x.apellidos || ""} ${x.nombres || ""}`.toLowerCase();
       const usuario = (x.usuario || "").toLowerCase();
@@ -1508,45 +1535,47 @@ async function viewNotas(me) {
 
   function updateCount(filtered, total) {
     const countEl = $("#studentsCount");
-    if (countEl) {
-      countEl.textContent = filtered === total ? 
-        `mostrando ${total} estudiantes` : 
-        `mostrando ${filtered} de ${total} estudiantes`;
-    }
+    if (!countEl) return;
+    countEl.textContent = (filtered === total)
+      ? `mostrando ${total} estudiantes`
+      : `mostrando ${filtered} de ${total} estudiantes`;
   }
 
-  // IMPORTANTE: Guardar cambios antes de cambiar de página
   function saveCurrentPageEdits() {
     $$("#nTableBody .n-inp").forEach(i => {
       const eid = Number(i.dataset.e);
       const k = i.dataset.k;
       const v = Number(String(i.value).replace(",", "."));
-      
       const estudiante = allEstudiantes.find(e => e.estudiante_id === eid);
-      if (estudiante) {
-        estudiante[k] = isNaN(v) ? 0 : v;
-      }
+      if (estudiante) estudiante[k] = isNaN(v) ? 0 : v;
     });
   }
 
+  function paginateLocal(list, page, perPage) {
+    const totalPages = Math.max(1, Math.ceil(list.length / perPage));
+    const safePage = Math.min(Math.max(1, page), totalPages);
+    const start = (safePage - 1) * perPage;
+    return { page: safePage, totalPages, slice: list.slice(start, start + perPage) };
+  }
+
   function renderEstudiantes() {
-    // Guardar ediciones de la página actual antes de renderizar
     saveCurrentPageEdits();
 
     const filtered = filterEstudiantes();
-    const { page, totalPages, slice } = paginate(filtered, currentPage, perPage);
+    const { page, totalPages, slice } = paginateLocal(filtered, currentPage, perPage);
     currentPage = page;
 
     updateCount(filtered.length, allEstudiantes.length);
 
     if (!slice.length) {
       $("#nTableBody").innerHTML = `<tr><td colspan="6" class="td-center">sin estudiantes encontrados</td></tr>`;
-      renderPager("#nPagerContainer", 1, 1, () => {});
+      renderPagerSimple("#nPagerContainer", 1, 1, () => {});
       return;
     }
 
     $("#nTableBody").innerHTML = slice.map(x => {
-      const nombre = `${x.apellidos || ""} ${x.nombres || ""}`.trim() || x.usuario || ("#" + x.estudiante_id);
+      const nombre = `${x.apellidos || ""} ${x.nombres || ""}`.trim() || x.usuario || "estudiante";
+
       const inpItem = (label, k, v) => `
         <div class="mini-item">
           <small class="mini-label">${escapeHtml(label)}</small>
@@ -1582,22 +1611,25 @@ async function viewNotas(me) {
         <small class="hint">total: ${escapeHtml(x.p3_total ?? "0.00")}</small>
       `;
 
+      const estado = (x.estado ?? "REPROBADO");
+      const estadoClass =
+        estado === "APROBADO" ? "status-active" :
+        estado === "SUPLETORIO" ? "status-warning" :
+        "status-inactive";
+
       return `
         <tr>
-          <td>
-            ${escapeHtml(nombre)}<br>
-            <small class="hint">cédula: ${escapeHtml(x.cedula || "-")} • id: ${escapeHtml(x.estudiante_id)}</small>
-          </td>
+          <td>${escapeHtml(nombre)}</td>
           <td>${p1}</td>
           <td>${p2}</td>
           <td>${p3}</td>
           <td>${escapeHtml(x.nota_final ?? "0.00")}</td>
-          <td><span class="status-badge ${(x.estado === "APROBADO") ? "status-active" : "status-inactive"}">${escapeHtml(x.estado ?? "REPROBADO")}</span></td>
+          <td><span class="status-badge ${estadoClass}">${escapeHtml(estado)}</span></td>
         </tr>
       `;
     }).join("");
 
-    renderPager("#nPagerContainer", currentPage, totalPages, (p) => {
+    renderPagerSimple("#nPagerContainer", currentPage, totalPages, (p) => {
       currentPage = p;
       renderEstudiantes();
     });
@@ -1607,7 +1639,7 @@ async function viewNotas(me) {
     const curso_id = Number(sel.value);
     if (!curso_id) {
       $("#nTableBody").innerHTML = `<tr><td colspan="6" class="td-center">sin curso</td></tr>`;
-      renderPager("#nPagerContainer", 1, 1, () => {});
+      renderPagerSimple("#nPagerContainer", 1, 1, () => {});
       updateCount(0, 0);
       return;
     }
@@ -1615,7 +1647,7 @@ async function viewNotas(me) {
     const r = await Api.curso_estudiantes(curso_id);
     if (!r.ok) {
       $("#nTableBody").innerHTML = `<tr><td colspan="6" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
-      renderPager("#nPagerContainer", 1, 1, () => {});
+      renderPagerSimple("#nPagerContainer", 1, 1, () => {});
       updateCount(0, 0);
       return;
     }
@@ -1627,8 +1659,8 @@ async function viewNotas(me) {
 
   sel.onchange = loadEstudiantes;
   $("#btnRecargarNotas").onclick = loadEstudiantes;
-  
-  // Search with debounce
+
+  // buscador con debounce
   let searchTimeout;
   const searchInput = $("#nSearchInput");
   if (searchInput) {
@@ -1649,10 +1681,8 @@ async function viewNotas(me) {
     const curso_id = Number(sel.value);
     if (!curso_id) return;
 
-    // CRÍTICO: Guardar cambios de la página actual antes de enviar
     saveCurrentPageEdits();
 
-    // Preparar items para enviar al API
     const items = allEstudiantes.map(est => ({
       estudiante_id: est.estudiante_id,
       p1_deberes: est.p1_deberes ?? 0,
@@ -1670,8 +1700,8 @@ async function viewNotas(me) {
     }));
 
     const rr = await Api.guardar_notas({ curso_id, items });
-
     setMsg(rr.ok ? "notas guardadas correctamente" : (rr.error || "error"), rr.ok);
+
     if (rr.ok) await loadEstudiantes();
   };
 }

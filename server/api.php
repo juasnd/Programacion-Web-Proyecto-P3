@@ -994,13 +994,15 @@ if ($action === "guardar_notas") {
     $p3l = (float)($it["p3_lab"] ?? 0);
     $p3e = (float)($it["p3_examen"] ?? 0);
 
-    mysqli_stmt_bind_param($st, "iidddddddddddddi",
-      $curso_id,$eid,
-      $p1d,$p1p,$p1l,$p1e,
-      $p2d,$p2p,$p2l,$p2e,
-      $p3d,$p3p,$p3l,$p3e,
+      // 2 ints + 12 doubles + 1 int
+    mysqli_stmt_bind_param($st, "iiddddddddddddi",
+      $curso_id, $eid,
+      $p1d, $p1p, $p1l, $p1e,
+      $p2d, $p2p, $p2l, $p2e,
+      $p3d, $p3p, $p3l, $p3e,
       $docente_id
     );
+
 
     if (!mysqli_stmt_execute($st)) {
       $e = mysqli_stmt_error($st);
