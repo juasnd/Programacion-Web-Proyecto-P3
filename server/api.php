@@ -774,7 +774,9 @@ if ($action === "matriculas_anular") {
   $estudiante_id = (int)($body["estudiante_id"] ?? 0);
   if ($curso_id<=0 || $estudiante_id<=0) fail("datos inválidos");
 
-  $st = mysqli_prepare($enlace, "UPDATE matriculas SET estado='RETIRADA' WHERE curso_id=? AND estudiante_id=?");
+  // OJO: en BD el enum es ('ACTIVA','ANULADA'). Si mandamos otro valor (p.ej. 'RETIRADA') MySQL falla.
+  // Al anular debe quedar en 'ANULADA' para que no aparezca en el horario (matriculas_list_estudiante filtra ACTIVA).
+  $st = mysqli_prepare($enlace, "UPDATE matriculas SET estado='ANULADA' WHERE curso_id=? AND estudiante_id=?");
   if (!$st) fail("error interno",500);
   mysqli_stmt_bind_param($st, "ii", $curso_id,$estudiante_id);
   mysqli_stmt_execute($st);
