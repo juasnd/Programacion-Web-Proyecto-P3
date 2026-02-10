@@ -1462,10 +1462,11 @@ async function viewNotas(me) {
               <th>p3</th>
               <th>final</th>
               <th>estado</th>
+              <th>supletorio</th>
             </tr>
           </thead>
           <tbody id="nTableBody">
-            <tr><td colspan="6" class="td-center">elige un curso</td></tr>
+            <tr><td colspan="7" class="td-center">elige un curso</td></tr>
           </tbody>
         </table>
       </div>
@@ -1483,7 +1484,6 @@ async function viewNotas(me) {
     $("#nMsg").innerHTML = msgBox(okk ? "success" : "info", t);
   };
 
-  // pager visible (anterior/siguiente)
   function renderPagerSimple(containerSel, page, totalPages, onPage) {
     const el = $(containerSel);
     if (!el) return;
@@ -1519,7 +1519,7 @@ async function viewNotas(me) {
 
   let allEstudiantes = [];
   let currentPage = 1;
-  const perPage = 2; // ✅ 2 estudiantes por página
+  const perPage = 2; 
 
   function filterEstudiantes() {
     const searchTerm = ($("#nSearchInput")?.value || "").toLowerCase().trim();
@@ -1541,13 +1541,25 @@ async function viewNotas(me) {
       : `mostrando ${filtered} de ${total} estudiantes`;
   }
 
+  // ✅ guardamos edits de la página actual al array (incluye supletorio)
   function saveCurrentPageEdits() {
     $$("#nTableBody .n-inp").forEach(i => {
       const eid = Number(i.dataset.e);
       const k = i.dataset.k;
-      const v = Number(String(i.value).replace(",", "."));
+      const raw = String(i.value ?? "").trim().replace(",", ".");
+      const v = raw === "" ? null : Number(raw);
+
       const estudiante = allEstudiantes.find(e => e.estudiante_id === eid);
-      if (estudiante) estudiante[k] = isNaN(v) ? 0 : v;
+      if (!estudiante) return;
+
+      // si es supletorio_nota, puede ser null
+      if (k === "supletorio_nota") {
+        estudiante[k] = (v === null || isNaN(v)) ? null : v;
+        return;
+      }
+
+      // demás notas: si queda vacío => 0
+      estudiante[k] = isNaN(v) ? 0 : v;
     });
   }
 
@@ -1556,6 +1568,25 @@ async function viewNotas(me) {
     const safePage = Math.min(Math.max(1, page), totalPages);
     const start = (safePage - 1) * perPage;
     return { page: safePage, totalPages, slice: list.slice(start, start + perPage) };
+  }
+
+  // ✅ cuando cambias cualquier nota normal, resetea supletorio (frontend)
+  function bindResetSupletorioOnChange() {
+    $$("#nTableBody .n-inp").forEach(inp => {
+      const k = inp.dataset.k;
+      if (k === "supletorio_nota") return;
+
+      inp.addEventListener("input", () => {
+        const eid = Number(inp.dataset.e);
+        const est = allEstudiantes.find(e => e.estudiante_id === eid);
+        if (!est) return;
+
+        est.supletorio_nota = null;
+
+        const su = $(`#nTableBody .n-inp[data-e="${eid}"][data-k="supletorio_nota"]`);
+        if (su) su.value = ""; // visualmente vuelve a cero (vacío)
+      });
+    });
   }
 
   function renderEstudiantes() {
@@ -1568,45 +1599,55 @@ async function viewNotas(me) {
     updateCount(filtered.length, allEstudiantes.length);
 
     if (!slice.length) {
-      $("#nTableBody").innerHTML = `<tr><td colspan="6" class="td-center">sin estudiantes encontrados</td></tr>`;
+      $("#nTableBody").innerHTML = `<tr><td colspan="7" class="td-center">sin estudiantes encontrados</td></tr>`;
       renderPagerSimple("#nPagerContainer", 1, 1, () => {});
       return;
     }
 
+    const inpItem = (label, k, v, max, step = "0.01") => `
+      <div class="mini-item">
+        <small class="mini-label">${escapeHtml(label)}</small>
+        <input
+          class="form-control n-inp"
+          type="number"
+          step="${step}"
+          min="0"
+          max="${max}"
+          ${canEdit ? "" : "disabled"}
+          data-e="{{EID}}"
+          data-k="${k}"
+          value="${escapeHtml(v ?? 0)}"
+        />
+      </div>
+    `;
+
     $("#nTableBody").innerHTML = slice.map(x => {
       const nombre = `${x.apellidos || ""} ${x.nombres || ""}`.trim() || x.usuario || "estudiante";
 
-      const inpItem = (label, k, v) => `
-        <div class="mini-item">
-          <small class="mini-label">${escapeHtml(label)}</small>
-          <input class="form-control n-inp" data-e="${x.estudiante_id}" data-k="${k}" value="${escapeHtml(v ?? 0)}" />
-        </div>
-      `;
-
       const p1 = `
         <div class="mini-grid">
-          ${inpItem("deberes", "p1_deberes", x.p1_deberes)}
-          ${inpItem("prueba",  "p1_prueba",  x.p1_prueba)}
-          ${inpItem("lab",     "p1_lab",     x.p1_lab)}
-          ${inpItem("examen",  "p1_examen",  x.p1_examen)}
+          ${inpItem("deberes", "p1_deberes", x.p1_deberes, 4).replace("{{EID}}", x.estudiante_id)}
+          ${inpItem("prueba",  "p1_prueba",  x.p1_prueba,  5).replace("{{EID}}", x.estudiante_id)}
+          ${inpItem("lab",     "p1_lab",     x.p1_lab,     4).replace("{{EID}}", x.estudiante_id)}
+          ${inpItem("examen",  "p1_examen",  x.p1_examen,  7).replace("{{EID}}", x.estudiante_id)}
         </div>
         <small class="hint">total: ${escapeHtml(x.p1_total ?? "0.00")}</small>
       `;
       const p2 = `
         <div class="mini-grid">
-          ${inpItem("deberes", "p2_deberes", x.p2_deberes)}
-          ${inpItem("prueba",  "p2_prueba",  x.p2_prueba)}
-          ${inpItem("lab",     "p2_lab",     x.p2_lab)}
-          ${inpItem("examen",  "p2_examen",  x.p2_examen)}
+          ${inpItem("deberes", "p2_deberes", x.p2_deberes, 4).replace("{{EID}}", x.estudiante_id)}
+          ${inpItem("prueba",  "p2_prueba",  x.p2_prueba,  5).replace("{{EID}}", x.estudiante_id)}
+          ${inpItem("lab",     "p2_lab",     x.p2_lab,     4).replace("{{EID}}", x.estudiante_id)}
+          ${inpItem("examen",  "p2_examen",  x.p2_examen,  7).replace("{{EID}}", x.estudiante_id)}
         </div>
         <small class="hint">total: ${escapeHtml(x.p2_total ?? "0.00")}</small>
       `;
       const p3 = `
         <div class="mini-grid">
-          ${inpItem("deberes", "p3_deberes", x.p3_deberes)}
-          ${inpItem("prueba",  "p3_prueba",  x.p3_prueba)}
-          ${inpItem("lab",     "p3_lab",     x.p3_lab)}
-          ${inpItem("examen",  "p3_examen",  x.p3_examen)}
+          ${inpItem("deberes", "p3_deberes", x.p3_deberes, 4).replace("{{EID}}", x.estudiante_id)}
+          ${inpItem("prueba",  "p3_prueba",  x.p3_prueba,  5).replace("{{EID}}", x.estudiante_id)}
+          ${inpItem("lab",     "p3_lab",     x.p3_lab,     4).replace("{{EID}}", x.estudiante_id)}
+          ${inpItem("examen",  "p3_examen",  x.p3_examen,  7).replace("{{EID}}", x.estudiante_id)}
         </div>
         <small class="hint">total: ${escapeHtml(x.p3_total ?? "0.00")}</small>
       `;
@@ -1617,6 +1658,14 @@ async function viewNotas(me) {
         estado === "SUPLETORIO" ? "status-warning" :
         "status-inactive";
 
+      // ✅ supletorio editable 0–20, pero solo tiene sentido si está en SUPLETORIO
+      const supletorioCell = (estado === "SUPLETORIO")
+        ? `<input class="form-control n-inp" type="number" step="0.01" min="0" max="20"
+              ${canEdit ? "" : "disabled"}
+              data-e="${x.estudiante_id}" data-k="supletorio_nota"
+              value="${escapeHtml(x.supletorio_nota ?? "")}" placeholder="0–20" />`
+        : `<span class="hint">—</span>`;
+
       return `
         <tr>
           <td>${escapeHtml(nombre)}</td>
@@ -1625,9 +1674,12 @@ async function viewNotas(me) {
           <td>${p3}</td>
           <td>${escapeHtml(x.nota_final ?? "0.00")}</td>
           <td><span class="status-badge ${estadoClass}">${escapeHtml(estado)}</span></td>
+          <td>${supletorioCell}</td>
         </tr>
       `;
     }).join("");
+
+    bindResetSupletorioOnChange();
 
     renderPagerSimple("#nPagerContainer", currentPage, totalPages, (p) => {
       currentPage = p;
@@ -1638,7 +1690,7 @@ async function viewNotas(me) {
   async function loadEstudiantes() {
     const curso_id = Number(sel.value);
     if (!curso_id) {
-      $("#nTableBody").innerHTML = `<tr><td colspan="6" class="td-center">sin curso</td></tr>`;
+      $("#nTableBody").innerHTML = `<tr><td colspan="7" class="td-center">sin curso</td></tr>`;
       renderPagerSimple("#nPagerContainer", 1, 1, () => {});
       updateCount(0, 0);
       return;
@@ -1646,7 +1698,7 @@ async function viewNotas(me) {
 
     const r = await Api.curso_estudiantes(curso_id);
     if (!r.ok) {
-      $("#nTableBody").innerHTML = `<tr><td colspan="6" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
+      $("#nTableBody").innerHTML = `<tr><td colspan="7" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
       renderPagerSimple("#nPagerContainer", 1, 1, () => {});
       updateCount(0, 0);
       return;
@@ -1669,7 +1721,7 @@ async function viewNotas(me) {
       searchTimeout = setTimeout(() => {
         currentPage = 1;
         renderEstudiantes();
-      }, 300);
+      }, 250);
     };
   }
 
@@ -1683,20 +1735,27 @@ async function viewNotas(me) {
 
     saveCurrentPageEdits();
 
+    // ✅ clave: si estás guardando notas “normales”, manda supletorio_nota (si existe),
+    // pero si cambiaste notas y quedó null, va null => API debe limpiarlo en BD.
     const items = allEstudiantes.map(est => ({
       estudiante_id: est.estudiante_id,
+
       p1_deberes: est.p1_deberes ?? 0,
-      p1_prueba: est.p1_prueba ?? 0,
-      p1_lab: est.p1_lab ?? 0,
-      p1_examen: est.p1_examen ?? 0,
+      p1_prueba:  est.p1_prueba  ?? 0,
+      p1_lab:     est.p1_lab     ?? 0,
+      p1_examen:  est.p1_examen  ?? 0,
+
       p2_deberes: est.p2_deberes ?? 0,
-      p2_prueba: est.p2_prueba ?? 0,
-      p2_lab: est.p2_lab ?? 0,
-      p2_examen: est.p2_examen ?? 0,
+      p2_prueba:  est.p2_prueba  ?? 0,
+      p2_lab:     est.p2_lab     ?? 0,
+      p2_examen:  est.p2_examen  ?? 0,
+
       p3_deberes: est.p3_deberes ?? 0,
-      p3_prueba: est.p3_prueba ?? 0,
-      p3_lab: est.p3_lab ?? 0,
-      p3_examen: est.p3_examen ?? 0
+      p3_prueba:  est.p3_prueba  ?? 0,
+      p3_lab:     est.p3_lab     ?? 0,
+      p3_examen:  est.p3_examen  ?? 0,
+
+      supletorio_nota: (est.supletorio_nota === null || est.supletorio_nota === undefined) ? null : est.supletorio_nota,
     }));
 
     const rr = await Api.guardar_notas({ curso_id, items });
@@ -1705,6 +1764,7 @@ async function viewNotas(me) {
     if (rr.ok) await loadEstudiantes();
   };
 }
+
 /* =========================
    reportes
    ========================= */
@@ -1766,7 +1826,7 @@ async function viewReportes(me) {
         <td>${escapeHtml(x.hora_inicio)}-${escapeHtml(x.hora_fin)}</td>
         <td>${escapeHtml(x.aula || "-")}</td>
       </tr>
-    `).join("") : `<tr><td colspan="6" class="td-center">sin datos</td></tr>`);
+    `).join("") : `<tr><td colspan="7" class="td-center">sin datos</td></tr>`);
   };
 
   $("#btnNotasEst").onclick = async () => {

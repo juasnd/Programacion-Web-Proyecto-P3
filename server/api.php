@@ -774,9 +774,7 @@ if ($action === "matriculas_anular") {
   $estudiante_id = (int)($body["estudiante_id"] ?? 0);
   if ($curso_id<=0 || $estudiante_id<=0) fail("datos inválidos");
 
-  // OJO: en BD el enum es ('ACTIVA','ANULADA'). Si mandamos otro valor (p.ej. 'RETIRADA') MySQL falla.
-  // Al anular debe quedar en 'ANULADA' para que no aparezca en el horario (matriculas_list_estudiante filtra ACTIVA).
-  $st = mysqli_prepare($enlace, "UPDATE matriculas SET estado='ANULADA' WHERE curso_id=? AND estudiante_id=?");
+  $st = mysqli_prepare($enlace, "UPDATE matriculas SET estado='RETIRADA' WHERE curso_id=? AND estudiante_id=?");
   if (!$st) fail("error interno",500);
   mysqli_stmt_bind_param($st, "ii", $curso_id,$estudiante_id);
   mysqli_stmt_execute($st);
@@ -911,7 +909,7 @@ if ($action === "curso_estudiantes") {
                  n.p1_deberes,n.p1_prueba,n.p1_lab,n.p1_examen,n.p1_total,
                  n.p2_deberes,n.p2_prueba,n.p2_lab,n.p2_examen,n.p2_total,
                  n.p3_deberes,n.p3_prueba,n.p3_lab,n.p3_examen,n.p3_total,
-                 n.nota_final,n.estado
+                 n.nota_final,n.estado,n.supletorio_nota
           FROM matriculas m
           JOIN usuarios u ON u.id=m.estudiante_id
           LEFT JOIN notas n ON n.curso_id=m.curso_id AND n.estudiante_id=m.estudiante_id
@@ -967,12 +965,14 @@ if ($action === "guardar_notas") {
             p1_deberes,p1_prueba,p1_lab,p1_examen,
             p2_deberes,p2_prueba,p2_lab,p2_examen,
             p3_deberes,p3_prueba,p3_lab,p3_examen,
+            supletorio_nota,
             actualizado_por)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
           ON DUPLICATE KEY UPDATE
             p1_deberes=VALUES(p1_deberes), p1_prueba=VALUES(p1_prueba), p1_lab=VALUES(p1_lab), p1_examen=VALUES(p1_examen),
             p2_deberes=VALUES(p2_deberes), p2_prueba=VALUES(p2_prueba), p2_lab=VALUES(p2_lab), p2_examen=VALUES(p2_examen),
             p3_deberes=VALUES(p3_deberes), p3_prueba=VALUES(p3_prueba), p3_lab=VALUES(p3_lab), p3_examen=VALUES(p3_examen),
+            supletorio_nota=VALUES(supletorio_nota),
             actualizado_por=VALUES(actualizado_por)";
   $st = mysqli_prepare($enlace, $sql);
   if (!$st) { mysqli_rollback($enlace); fail("error interno",500); }
@@ -996,15 +996,17 @@ if ($action === "guardar_notas") {
     $p3l = (float)($it["p3_lab"] ?? 0);
     $p3e = (float)($it["p3_examen"] ?? 0);
 
-      // 2 ints + 12 doubles + 1 int
-    mysqli_stmt_bind_param($st, "iiddddddddddddi",
-      $curso_id, $eid,
-      $p1d, $p1p, $p1l, $p1e,
-      $p2d, $p2p, $p2l, $p2e,
-      $p3d, $p3p, $p3l, $p3e,
+    $sup = $it["supletorio_nota"];
+    $sup = ($sup === "" || $sup === null) ? null : (float)$sup;
+
+    mysqli_stmt_bind_param($st, "iidddddddddddddi",
+      $curso_id,$eid,
+      $p1d,$p1p,$p1l,$p1e,
+      $p2d,$p2p,$p2l,$p2e,
+      $p3d,$p3p,$p3l,$p3e,
+      $sup,
       $docente_id
     );
-
 
     if (!mysqli_stmt_execute($st)) {
       $e = mysqli_stmt_error($st);
@@ -1057,7 +1059,7 @@ if ($action === "reporte_notas_estudiante") {
   $eid = (int)$_SESSION["usuario_id"];
 
   $sql = "SELECT c.nombre,c.paralelo,c.periodo,
-                 n.p1_total,n.p2_total,n.p3_total,n.nota_final,n.estado
+                 n.p1_total,n.p2_total,n.p3_total,n.nota_final,n.estado,n.supletorio_nota
           FROM matriculas m
           JOIN cursos c ON c.id=m.curso_id
           LEFT JOIN notas n ON n.curso_id=m.curso_id AND n.estudiante_id=m.estudiante_id
