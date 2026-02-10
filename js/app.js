@@ -1427,17 +1427,43 @@ async function viewNotas(me) {
 
   const canEdit = hasPerm(me, "notas", "editar");
 
+  // ====== CONFIG ======
+  // ponderación 4/5/4/7 (total 20) PERO el docente ingresa cada actividad SOBRE 20.
+  const W = {
+    p1_deberes: 4, p1_prueba: 5, p1_lab: 4, p1_examen: 7,
+    p2_deberes: 4, p2_prueba: 5, p2_lab: 4, p2_examen: 7,
+    p3_deberes: 4, p3_prueba: 5, p3_lab: 4, p3_examen: 7,
+  };
+
+  const PER_PAGE = 2; // ✅ fijo en 2 (tu paginación de antes)
+  const clamp = (n, a, b) => Math.min(b, Math.max(a, n));
+  const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+  // BD/API guardan "ponderado" (0..peso). UI muestra "sobre 20" (0..20).
+  function storedToUI(stored, weight) {
+    const s = Number(stored);
+    if (!isFinite(s) || !weight) return 0;
+    return round2(clamp((s / weight) * 20, 0, 20));
+  }
+  function uiToStored(ui, weight) {
+    const u = Number(ui);
+    if (!isFinite(u) || !weight) return 0;
+    return round2(clamp((u / 20) * weight, 0, weight));
+  }
+
   setView(shell(me, "notas", `
     <div class="dashboard-container fade-in">
       <div id="nMsg"></div>
 
       <div class="form-container">
         <h3>ingreso de notas</h3>
+
         <div class="form-grid">
           <div class="form-group">
             <label>mis cursos</label>
             <select id="n_curso" class="form-control select"></select>
           </div>
+
           <div class="form-group">
             <label>buscar estudiante</label>
             <input type="text" id="nSearchInput" class="form-control" placeholder="nombre, cédula o usuario..." />
@@ -1449,7 +1475,11 @@ async function viewNotas(me) {
           <button class="btn btn-primary" id="btnGuardarNotas" type="button" ${canEdit ? "" : "disabled"}>guardar</button>
           <button class="btn btn-outline" id="btnRecargarNotas" type="button">recargar</button>
         </div>
-        <small class="hint">ingresa valores numéricos. se guardan por estudiante. <strong id="studentsCount"></strong></small>
+
+        <small class="hint">
+          ingresa cada actividad <strong>sobre 20</strong>. el sistema la pondera a <strong>4/5/4/7</strong>.
+          <strong id="studentsCount"></strong>
+        </small>
       </div>
 
       <div class="table-container">
@@ -1507,7 +1537,7 @@ async function viewNotas(me) {
     if (nextBtn) nextBtn.onclick = () => { if (page < totalPages) onPage(page + 1); };
   }
 
-  // cargar cursos
+  // ===== cargar cursos =====
   const cursosRes = await Api.mis_cursos();
   const cursos = cursosRes.ok ? (cursosRes.rows || cursosRes.data || []) : [];
   const sel = $("#n_curso");
@@ -1519,7 +1549,6 @@ async function viewNotas(me) {
 
   let allEstudiantes = [];
   let currentPage = 1;
-  const perPage = 2; 
 
   function filterEstudiantes() {
     const searchTerm = ($("#nSearchInput")?.value || "").toLowerCase().trim();
@@ -1541,7 +1570,7 @@ async function viewNotas(me) {
       : `mostrando ${filtered} de ${total} estudiantes`;
   }
 
-  // ✅ guardamos edits de la página actual al array (incluye supletorio)
+  // UI (0..20) -> guardado ponderado (0..peso). Supletorio se queda 0..20.
   function saveCurrentPageEdits() {
     $$("#nTableBody .n-inp").forEach(i => {
       const eid = Number(i.dataset.e);
@@ -1549,28 +1578,30 @@ async function viewNotas(me) {
       const raw = String(i.value ?? "").trim().replace(",", ".");
       const v = raw === "" ? null : Number(raw);
 
-      const estudiante = allEstudiantes.find(e => e.estudiante_id === eid);
-      if (!estudiante) return;
+      const est = allEstudiantes.find(e => e.estudiante_id === eid);
+      if (!est) return;
 
-      // si es supletorio_nota, puede ser null
       if (k === "supletorio_nota") {
-        estudiante[k] = (v === null || isNaN(v)) ? null : v;
+        est.supletorio_nota = (v === null || !isFinite(v)) ? null : clamp(v, 0, 20);
         return;
       }
 
-      // demás notas: si queda vacío => 0
-      estudiante[k] = isNaN(v) ? 0 : v;
+      const w = W[k] || 0;
+      if (!w) return;
+
+      const uiVal = (!isFinite(v) || v === null) ? 0 : clamp(v, 0, 20);
+      est[k] = uiToStored(uiVal, w);
     });
   }
 
-  function paginateLocal(list, page, perPage) {
-    const totalPages = Math.max(1, Math.ceil(list.length / perPage));
+  function paginateLocal(list, page, pp) {
+    const totalPages = Math.max(1, Math.ceil(list.length / pp));
     const safePage = Math.min(Math.max(1, page), totalPages);
-    const start = (safePage - 1) * perPage;
-    return { page: safePage, totalPages, slice: list.slice(start, start + perPage) };
+    const start = (safePage - 1) * pp;
+    return { page: safePage, totalPages, slice: list.slice(start, start + pp) };
   }
 
-  // ✅ cuando cambias cualquier nota normal, resetea supletorio (frontend)
+  // si cambia cualquier actividad normal, resetea supletorio (frontend)
   function bindResetSupletorioOnChange() {
     $$("#nTableBody .n-inp").forEach(inp => {
       const k = inp.dataset.k;
@@ -1584,7 +1615,7 @@ async function viewNotas(me) {
         est.supletorio_nota = null;
 
         const su = $(`#nTableBody .n-inp[data-e="${eid}"][data-k="supletorio_nota"]`);
-        if (su) su.value = ""; // visualmente vuelve a cero (vacío)
+        if (su) su.value = "";
       });
     });
   }
@@ -1593,7 +1624,7 @@ async function viewNotas(me) {
     saveCurrentPageEdits();
 
     const filtered = filterEstudiantes();
-    const { page, totalPages, slice } = paginateLocal(filtered, currentPage, perPage);
+    const { page, totalPages, slice } = paginateLocal(filtered, currentPage, PER_PAGE);
     currentPage = page;
 
     updateCount(filtered.length, allEstudiantes.length);
@@ -1604,52 +1635,58 @@ async function viewNotas(me) {
       return;
     }
 
-    const inpItem = (label, k, v, max, step = "0.01") => `
-      <div class="mini-item">
-        <small class="mini-label">${escapeHtml(label)}</small>
-        <input
-          class="form-control n-inp"
-          type="number"
-          step="${step}"
-          min="0"
-          max="${max}"
-          ${canEdit ? "" : "disabled"}
-          data-e="{{EID}}"
-          data-k="${k}"
-          value="${escapeHtml(v ?? 0)}"
-        />
-      </div>
-    `;
+    const inpItemUI20 = (label, k, storedVal, step = "0.01") => {
+      const w = W[k] || 0;
+      const uiVal = storedToUI(storedVal ?? 0, w);
+      return `
+        <div class="mini-item">
+          <small class="mini-label">${escapeHtml(label)}</small>
+          <input
+            class="form-control n-inp"
+            type="number"
+            step="${step}"
+            min="0"
+            max="20"
+            ${canEdit ? "" : "disabled"}
+            data-e="{{EID}}"
+            data-k="${k}"
+            value="${escapeHtml(uiVal)}"
+          />
+        </div>
+      `;
+    };
 
     $("#nTableBody").innerHTML = slice.map(x => {
       const nombre = `${x.apellidos || ""} ${x.nombres || ""}`.trim() || x.usuario || "estudiante";
 
       const p1 = `
         <div class="mini-grid">
-          ${inpItem("deberes", "p1_deberes", x.p1_deberes, 4).replace("{{EID}}", x.estudiante_id)}
-          ${inpItem("prueba",  "p1_prueba",  x.p1_prueba,  5).replace("{{EID}}", x.estudiante_id)}
-          ${inpItem("lab",     "p1_lab",     x.p1_lab,     4).replace("{{EID}}", x.estudiante_id)}
-          ${inpItem("examen",  "p1_examen",  x.p1_examen,  7).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("deberes", "p1_deberes", x.p1_deberes).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("prueba",  "p1_prueba",  x.p1_prueba ).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("lab",     "p1_lab",     x.p1_lab    ).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("examen",  "p1_examen",  x.p1_examen ).replace("{{EID}}", x.estudiante_id)}
         </div>
-        <small class="hint">total: ${escapeHtml(x.p1_total ?? "0.00")}</small>
+        <small class="hint">total (ponderado): ${escapeHtml(x.p1_total ?? "0.00")}</small>
       `;
+
       const p2 = `
         <div class="mini-grid">
-          ${inpItem("deberes", "p2_deberes", x.p2_deberes, 4).replace("{{EID}}", x.estudiante_id)}
-          ${inpItem("prueba",  "p2_prueba",  x.p2_prueba,  5).replace("{{EID}}", x.estudiante_id)}
-          ${inpItem("lab",     "p2_lab",     x.p2_lab,     4).replace("{{EID}}", x.estudiante_id)}
-          ${inpItem("examen",  "p2_examen",  x.p2_examen,  7).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("deberes", "p2_deberes", x.p2_deberes).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("prueba",  "p2_prueba",  x.p2_prueba ).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("lab",     "p2_lab",     x.p2_lab    ).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("examen",  "p2_examen",  x.p2_examen ).replace("{{EID}}", x.estudiante_id)}
         </div>
-        <small class="hint">total: ${escapeHtml(x.p2_total ?? "0.00")}</small>
+        <small class="hint">total (ponderado): ${escapeHtml(x.p2_total ?? "0.00")}</small>
       `;
+
       const p3 = `
         <div class="mini-grid">
-          ${inpItem("deberes", "p3_deberes", x.p3_deberes, 4).replace("{{EID}}", x.estudiante_id)}
-          ${inpItem("prueba",  "p3_prueba",  x.p3_prueba,  5).replace("{{EID}}", x.estudiante_id)}
-          ${inpItem("lab",     "p3_lab",     x.p3_lab,     4).replace("{{EID}}", x.estudiante_id)}
-          ${inpItem("examen",  "p3_examen",  x.p3_examen,  7).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("deberes", "p3_deberes", x.p3_deberes).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("prueba",  "p3_prueba",  x.p3_prueba ).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("lab",     "p3_lab",     x.p3_lab    ).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("examen",  "p3_examen",  x.p3_examen ).replace("{{EID}}", x.estudiante_id)}
         </div>
-        <small class="hint">total: ${escapeHtml(x.p3_total ?? "0.00")}</small>
+        <small class="hint">total (ponderado): ${escapeHtml(x.p3_total ?? "0.00")}</small>
       `;
 
       const estado = (x.estado ?? "REPROBADO");
@@ -1658,7 +1695,6 @@ async function viewNotas(me) {
         estado === "SUPLETORIO" ? "status-warning" :
         "status-inactive";
 
-      // ✅ supletorio editable 0–20, pero solo tiene sentido si está en SUPLETORIO
       const supletorioCell = (estado === "SUPLETORIO")
         ? `<input class="form-control n-inp" type="number" step="0.01" min="0" max="20"
               ${canEdit ? "" : "disabled"}
@@ -1735,8 +1771,7 @@ async function viewNotas(me) {
 
     saveCurrentPageEdits();
 
-    // ✅ clave: si estás guardando notas “normales”, manda supletorio_nota (si existe),
-    // pero si cambiaste notas y quedó null, va null => API debe limpiarlo en BD.
+    // enviamos actividades ya ponderadas (0..peso), supletorio sobre 20
     const items = allEstudiantes.map(est => ({
       estudiante_id: est.estudiante_id,
 
@@ -1755,7 +1790,9 @@ async function viewNotas(me) {
       p3_lab:     est.p3_lab     ?? 0,
       p3_examen:  est.p3_examen  ?? 0,
 
-      supletorio_nota: (est.supletorio_nota === null || est.supletorio_nota === undefined) ? null : est.supletorio_nota,
+      supletorio_nota: (est.supletorio_nota === null || est.supletorio_nota === undefined)
+        ? null
+        : clamp(est.supletorio_nota, 0, 20),
     }));
 
     const rr = await Api.guardar_notas({ curso_id, items });
@@ -1764,6 +1801,8 @@ async function viewNotas(me) {
     if (rr.ok) await loadEstudiantes();
   };
 }
+
+
 
 /* =========================
    reportes

@@ -69,5 +69,6 @@ const Api = (() => {
 
     reporte_horario_docente: () => req("reporte_horario_docente"),
     reporte_notas_estudiante: () => req("reporte_notas_estudiante"),
+    
   };
 })();
