@@ -4,7 +4,6 @@ function $$(sel) { return document.querySelectorAll(sel); }
 
 let clockTimer = null;
 
-// cache simple para no golpear el API a cada rato
 let USERS_CACHE = { loaded: false, data: [], at: 0 };
 
 function ensureApp() {
@@ -145,11 +144,6 @@ function renderPager(containerSel, page, totalPages, onGo) {
   });
 }
 
-/* =========================
-   usuarios helper (para selects de estudiantes/docentes)
-   ========================= */
-
-// intenta detectar "docente/estudiante" por rol_nombre
 function roleKind(u) {
   const r = String(u?.rol_nombre || "").toLowerCase();
   if (r.includes("docente") || r.includes("prof")) return "docente";
@@ -227,14 +221,14 @@ function shell(me, active, contentHtml) {
       </div>
 
       <nav class="topnav" aria-label="navegación">
-        <a class="nav-link ${active === "dashboard" ? "active" : ""}" href="#dashboard">dashboard</a>
-        ${navItem("usuarios", "usuarios", showUsuarios)}
-        ${navItem("roles", "roles", showRoles)}
-        ${navItem("permisos", "permisos", showPermisos)}
-        ${navItem("cursos", "cursos", showCursos)}
-        ${navItem("matriculas", "matriculación", showMatriculas)}
-        ${navItem("notas", "notas", showNotas)}
-        ${navItem("reportes", "reportes", showReportes)}
+        <a class="nav-link ${active === "dashboard" ? "active" : ""}" href="#dashboard">Inicio</a>
+        ${navItem("usuarios", "Usuarios", showUsuarios)}
+        ${navItem("roles", "Roles", showRoles)}
+        ${navItem("permisos", "Rermisos", showPermisos)}
+        ${navItem("cursos", "Cursos", showCursos)}
+        ${navItem("matriculas", "Matriculación", showMatriculas)}
+        ${navItem("notas", "Notas", showNotas)}
+        ${navItem("reportes", "Reportes", showReportes)}
       </nav>
 
       <div class="topbar-right">
@@ -264,8 +258,10 @@ function loginView(msg = "") {
   setView(`
     <div class="login-wrapper">
       <div class="login-box fade-in">
-        <div class="login-logo">sistema web</div>
-        <div class="login-subtitle">gestión académica</div>
+        <div class="login-logo"> Sistema Web</div>
+        <strong>
+        <div class="login-subtitle">Inicio De Sesion</div>
+        </strong>
 
         <div id="msg">${msg || ""}</div>
 
@@ -316,19 +312,19 @@ async function viewDashboard(me) {
     `);
   };
 
-  pushCard(hasAnyPerm(me, "usuarios"), "usuarios", "usuarios", "administra usuarios del sistema.");
-  pushCard(hasAnyPerm(me, "roles"), "roles", "roles", "crea roles del sistema.");
-  pushCard(hasAnyPerm(me, "permisos"), "permisos", "permisos", "asigna permisos por rol.");
-  pushCard(hasAnyPerm(me, "cursos"), "cursos", "cursos", "gestiona cursos y horarios.");
-  pushCard(hasAnyPerm(me, "matriculas"), "matriculas", "matriculación", "matricula con validación de choques.");
-  pushCard(hasAnyPerm(me, "notas"), "notas", "notas", "ingreso de notas por curso.");
-  pushCard(hasAnyPerm(me, "reportes") || hasAnyPerm(me, "horarios"), "reportes", "reportes", "horario y notas.");
+  pushCard(hasAnyPerm(me, "usuarios"), "usuarios", "Usuarios", "administra usuarios del sistema.");
+  pushCard(hasAnyPerm(me, "roles"), "roles", "Roles", "crea roles del sistema.");
+  pushCard(hasAnyPerm(me, "permisos"), "permisos", "Permisos", "asigna permisos por rol.");
+  pushCard(hasAnyPerm(me, "cursos"), "cursos", "Cursos", "gestiona cursos y horarios.");
+  pushCard(hasAnyPerm(me, "matriculas"), "matriculas", "Matriculación", "matricula con validación de choques.");
+  pushCard(hasAnyPerm(me, "notas"), "notas", "Notas", "ingreso de notas por curso.");
+  pushCard(hasAnyPerm(me, "reportes") || hasAnyPerm(me, "horarios"), "reportes", "Reportes", "horario y notas.");
 
-  setView(shell(me, "dashboard", `
+  setView(shell(me, "inicio", `
     <div class="dashboard-container fade-in">
       <div class="welcome-section">
-        <h1>bienvenido, ${escapeHtml(fullName(me))}</h1>
-        <p>panel principal</p>
+        <h1>Bienvenido, ${escapeHtml(fullName(me))}</h1>
+        <p>Panel principal</p>
       </div>
 
       <div class="modules-grid">

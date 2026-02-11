@@ -165,7 +165,6 @@ body{
   text-align:center;
   color:var(--primary);
   margin-bottom:.25rem;
-  text-transform:lowercase;
 }
 
 .login-subtitle{
