@@ -1033,7 +1033,6 @@ async function viewCursos(me) {
           <div class="form-group">
             <label>docente (opcional)</label>
             <select id="c_docente_sel" class="form-control select"></select>
-            <small class="hint">puedes buscar por cédula abajo.</small>
           </div>
 
           <div class="form-group">
@@ -1246,7 +1245,6 @@ async function viewMatriculas(me) {
           <div class="form-group" style="grid-column: 1 / -1;">
             <label>estudiante</label>
             <select id="m_est_sel" class="form-control select"></select>
-            <small class="hint">elige de la lista o busca por cédula abajo.</small>
           </div>
 
           <div class="form-group">
@@ -1266,13 +1264,11 @@ async function viewMatriculas(me) {
           <button class="btn btn-outline" id="btnRefEst" type="button">recargar estudiantes</button>
         </div>
 
-        <small class="hint">valida choque de horario en el mismo periodo.</small>
       </div>
 
       <div class="table-container" style="margin-top: 1rem;">
         <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px;">
-          <h3 style="margin:0;">horario del estudiante (matrículas activas)</h3>
-          <button class="btn btn-outline" id="btnVerHorarioEst" type="button">actualizar horario</button>
+          <h3 style="margin:0;">matrículas activas</h3>
         </div>
         <table class="data-table">
           <thead>
