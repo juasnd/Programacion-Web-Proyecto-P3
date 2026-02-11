@@ -1,4 +1,4 @@
-// /js/app.js
+/* /js/app.js (corregido: topbar con desplegables Roles/Reportes) */
 function $(sel) { return document.querySelector(sel); }
 function $$(sel) { return document.querySelectorAll(sel); }
 
@@ -191,7 +191,7 @@ function bindCedulaPicker(inputEl, users, onPick) {
 }
 
 /* =========================
-   shell (layout)
+   shell (layout) + dropdown topbar
    ========================= */
 function shell(me, active, contentHtml) {
   const showUsuarios   = hasAnyPerm(me, "usuarios");
@@ -202,9 +202,32 @@ function shell(me, active, contentHtml) {
   const showNotas      = hasAnyPerm(me, "notas");
   const showReportes   = hasAnyPerm(me, "reportes") || hasAnyPerm(me, "horarios");
 
-  const navItem = (id, label, show) => show ? `
-    <a class="nav-link ${active === id ? "active" : ""}" href="#${id}">${label}</a>
+  const navLink = (id, label, show) => show ? `
+    <a class="nav-link ${active === id ? "active" : ""}" href="#${id}">${escapeHtml(label)}</a>
   ` : "";
+
+  const navDropdown = (groupId, label, show, items = []) => {
+    if (!show || !items.length) return "";
+    const isActive = items.some(x => x.id === active);
+    return `
+      <div class="nav-dd ${isActive ? "active" : ""}" data-dd="${groupId}">
+        <button class="nav-dd-btn" type="button"
+          aria-haspopup="menu"
+          aria-expanded="false"
+          data-dd-btn="${groupId}">
+          ${escapeHtml(label)} <span class="nav-dd-caret">▾</span>
+        </button>
+
+        <div class="nav-dd-menu" role="menu" data-dd-menu="${groupId}">
+          ${items.map(x => `
+            <a class="nav-dd-item ${active === x.id ? "active" : ""}" href="#${x.id}" role="menuitem">
+              ${escapeHtml(x.label)}
+            </a>
+          `).join("")}
+        </div>
+      </div>
+    `;
+  };
 
   const avatarChar = escapeHtml(((me?.nombres || me?.usuario || "u")[0] || "u").toUpperCase());
   const rolName = escapeHtml(me?.rol_nombre || "sin rol");
@@ -222,13 +245,21 @@ function shell(me, active, contentHtml) {
 
       <nav class="topnav" aria-label="navegación">
         <a class="nav-link ${active === "dashboard" ? "active" : ""}" href="#dashboard">Inicio</a>
-        ${navItem("usuarios", "Usuarios", showUsuarios)}
-        ${navItem("roles", "Roles", showRoles)}
-        ${navItem("permisos", "Rermisos", showPermisos)}
-        ${navItem("cursos", "Cursos", showCursos)}
-        ${navItem("matriculas", "Matriculación", showMatriculas)}
-        ${navItem("notas", "Notas", showNotas)}
-        ${navItem("reportes", "Reportes", showReportes)}
+
+        ${navLink("usuarios", "Usuarios", showUsuarios)}
+
+        ${navDropdown("roles_dd", "Roles", (showRoles || showPermisos), [
+          ...(showRoles ? [{ id: "roles", label: "Crear / Ver roles" }] : []),
+          ...(showPermisos ? [{ id: "permisos", label: "Asignar permisos" }] : []),
+        ])}
+
+        ${navLink("cursos", "Cursos", showCursos)}
+        ${navLink("matriculas", "Matriculación", showMatriculas)}
+        ${navLink("notas", "Notas", showNotas)}
+
+        ${navDropdown("reportes_dd", "Reportes", showReportes, [
+          { id: "reportes", label: "Reportes" },
+        ])}
       </nav>
 
       <div class="topbar-right">
@@ -248,6 +279,43 @@ function shell(me, active, contentHtml) {
       <div id="content">${contentHtml}</div>
     </main>
   `;
+}
+
+function bindTopbarDropdowns() {
+  // evita duplicar listeners por re-render
+  if (window.__topbar_dd_bound) return;
+  window.__topbar_dd_bound = true;
+
+  const closeAll = () => {
+    document.querySelectorAll(".nav-dd.open").forEach(dd => {
+      dd.classList.remove("open");
+      const btn = dd.querySelector(".nav-dd-btn");
+      if (btn) btn.setAttribute("aria-expanded", "false");
+    });
+  };
+
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-dd-btn]");
+    if (btn) {
+      const id = btn.getAttribute("data-dd-btn");
+      const dd = document.querySelector(`.nav-dd[data-dd="${id}"]`);
+      if (!dd) return;
+
+      const isOpen = dd.classList.contains("open");
+      closeAll();
+      if (!isOpen) {
+        dd.classList.add("open");
+        btn.setAttribute("aria-expanded", "true");
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
+    if (!e.target.closest(".nav-dd")) closeAll();
+  });
+
+  window.addEventListener("hashchange", () => closeAll());
 }
 
 /* =========================
@@ -320,7 +388,7 @@ async function viewDashboard(me) {
   pushCard(hasAnyPerm(me, "notas"), "notas", "Notas", "ingreso de notas por curso.");
   pushCard(hasAnyPerm(me, "reportes") || hasAnyPerm(me, "horarios"), "reportes", "Reportes", "horario y notas.");
 
-  setView(shell(me, "inicio", `
+  setView(shell(me, "dashboard", `
     <div class="dashboard-container fade-in">
       <div class="welcome-section">
         <h1>Bienvenido, ${escapeHtml(fullName(me))}</h1>
@@ -332,6 +400,8 @@ async function viewDashboard(me) {
       </div>
     </div>
   `));
+
+  bindTopbarDropdowns();
 
   $("#btnLogout").onclick = logoutTotal;
   startClock();
@@ -562,6 +632,8 @@ async function viewUsuarios(me) {
     </div>
   `));
 
+  bindTopbarDropdowns();
+
   $("#btnLogout").onclick = logoutTotal;
   startClock();
 
@@ -761,6 +833,8 @@ async function viewRoles(me) {
     </div>
   `));
 
+  bindTopbarDropdowns();
+
   $("#btnLogout").onclick = logoutTotal;
   startClock();
 
@@ -870,6 +944,7 @@ async function viewPermisos(me) {
 
   if (!me.is_admin) {
     setView(shell(me, "permisos", `<div class="message info">solo administrador puede asignar permisos</div>`));
+    bindTopbarDropdowns();
     $("#btnLogout").onclick = logoutTotal;
     startClock();
     return;
@@ -877,6 +952,7 @@ async function viewPermisos(me) {
 
   if (!hasPerm(me, "permisos", "ver")) {
     setView(shell(me, "permisos", `<div class="message info">no tienes permiso para ver permisos</div>`));
+    bindTopbarDropdowns();
     $("#btnLogout").onclick = logoutTotal;
     startClock();
     return;
@@ -885,6 +961,7 @@ async function viewPermisos(me) {
   const r = await Api.permisos_get();
   if (!r.ok) {
     setView(shell(me, "permisos", `<div class="message info">${escapeHtml(r.error || "error")}</div>`));
+    bindTopbarDropdowns();
     $("#btnLogout").onclick = logoutTotal;
     startClock();
     return;
@@ -930,6 +1007,8 @@ async function viewPermisos(me) {
       </div>
     </div>
   `));
+
+  bindTopbarDropdowns();
 
   $("#btnLogout").onclick = logoutTotal;
   startClock();
@@ -1090,6 +1169,8 @@ async function viewCursos(me) {
       </div>
     </div>
   `));
+
+  bindTopbarDropdowns();
 
   $("#btnLogout").onclick = logoutTotal;
   startClock();
@@ -1283,6 +1364,8 @@ async function viewMatriculas(me) {
     </div>
   `));
 
+  bindTopbarDropdowns();
+
   $("#btnLogout").onclick = logoutTotal;
   startClock();
 
@@ -1412,26 +1495,23 @@ async function viewMatriculas(me) {
 }
 
 /* =========================
-   notas (docente)
+   notas
    ========================= */
 async function viewNotas(me) {
   if (!hasAnyPerm(me, "notas")) { location.hash = "#dashboard"; return router(); }
 
   const canEdit = hasPerm(me, "notas", "editar");
 
-  // ====== CONFIG ======
-  // ponderación 4/5/4/7 (total 20) PERO el docente ingresa cada actividad SOBRE 20.
   const W = {
     p1_deberes: 4, p1_prueba: 5, p1_lab: 4, p1_examen: 7,
     p2_deberes: 4, p2_prueba: 5, p2_lab: 4, p2_examen: 7,
     p3_deberes: 4, p3_prueba: 5, p3_lab: 4, p3_examen: 7,
   };
 
-  const PER_PAGE = 2; // ✅ fijo en 2 (tu paginación de antes)
+  const PER_PAGE = 2;
   const clamp = (n, a, b) => Math.min(b, Math.max(a, n));
   const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
-  // BD/API guardan "ponderado" (0..peso). UI muestra "sobre 20" (0..20).
   function storedToUI(stored, weight) {
     const s = Number(stored);
     if (!isFinite(s) || !weight) return 0;
@@ -1459,7 +1539,6 @@ async function viewNotas(me) {
           <div class="form-group">
             <label>buscar estudiante</label>
             <input type="text" id="nSearchInput" class="form-control" placeholder="nombre, cédula o usuario..." />
-            <span class="hint">filtra en tiempo real</span>
           </div>
         </div>
 
@@ -1467,11 +1546,6 @@ async function viewNotas(me) {
           <button class="btn btn-primary" id="btnGuardarNotas" type="button" ${canEdit ? "" : "disabled"}>guardar</button>
           <button class="btn btn-outline" id="btnRecargarNotas" type="button">recargar</button>
         </div>
-
-        <small class="hint">
-          ingresa cada actividad <strong>sobre 20</strong>. el sistema la pondera a <strong>4/5/4/7</strong>.
-          <strong id="studentsCount"></strong>
-        </small>
       </div>
 
       <div class="table-container">
@@ -1498,6 +1572,8 @@ async function viewNotas(me) {
       </div>
     </div>
   `));
+
+  bindTopbarDropdowns();
 
   $("#btnLogout").onclick = logoutTotal;
   startClock();
@@ -1653,20 +1729,20 @@ async function viewNotas(me) {
 
       const p1 = `
         <div class="mini-grid">
-          ${inpItemUI20("deberes", "p1_deberes", x.p1_deberes).replace("{{EID}}", x.estudiante_id)}
-          ${inpItemUI20("prueba",  "p1_prueba",  x.p1_prueba ).replace("{{EID}}", x.estudiante_id)}
-          ${inpItemUI20("lab",     "p1_lab",     x.p1_lab    ).replace("{{EID}}", x.estudiante_id)}
-          ${inpItemUI20("examen",  "p1_examen",  x.p1_examen ).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("Deberes", "p1_deberes", x.p1_deberes).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("Prueba",  "p1_prueba",  x.p1_prueba ).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("Lab",     "p1_lab",     x.p1_lab    ).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("Examen",  "p1_examen",  x.p1_examen ).replace("{{EID}}", x.estudiante_id)}
         </div>
         <small class="hint">total (ponderado): ${escapeHtml(x.p1_total ?? "0.00")}</small>
       `;
 
       const p2 = `
         <div class="mini-grid">
-          ${inpItemUI20("deberes", "p2_deberes", x.p2_deberes).replace("{{EID}}", x.estudiante_id)}
-          ${inpItemUI20("prueba",  "p2_prueba",  x.p2_prueba ).replace("{{EID}}", x.estudiante_id)}
-          ${inpItemUI20("lab",     "p2_lab",     x.p2_lab    ).replace("{{EID}}", x.estudiante_id)}
-          ${inpItemUI20("examen",  "p2_examen",  x.p2_examen ).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("Deberes", "p2_deberes", x.p2_deberes).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("Prueba",  "p2_prueba",  x.p2_prueba ).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("Lab",     "p2_lab",     x.p2_lab    ).replace("{{EID}}", x.estudiante_id)}
+          ${inpItemUI20("Examen",  "p2_examen",  x.p2_examen ).replace("{{EID}}", x.estudiante_id)}
         </div>
         <small class="hint">total (ponderado): ${escapeHtml(x.p2_total ?? "0.00")}</small>
       `;
@@ -1794,8 +1870,6 @@ async function viewNotas(me) {
   };
 }
 
-
-
 /* =========================
    reportes
    ========================= */
@@ -1828,6 +1902,8 @@ async function viewReportes(me) {
       </div>
     </div>
   `));
+
+  bindTopbarDropdowns();
 
   $("#btnLogout").onclick = logoutTotal;
   startClock();

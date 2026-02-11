@@ -565,3 +565,94 @@ body{
   gap:.5rem;
   flex-wrap:wrap;
 }
+/* ===== dropdown topnav (glass / transparente) ===== */
+.nav-dd{
+  position:relative;
+  display:inline-flex;
+  align-items:center;
+}
+
+.nav-dd-btn{
+  border:0;
+  background:transparent;
+  cursor:pointer;
+
+  text-decoration:none;
+  color:var(--muted);
+  font-weight:700;
+  font-size:.9rem;
+  padding:.55rem .85rem;
+  border-radius:.75rem;
+  transition:background .15s ease, color .15s ease;
+  white-space:nowrap;
+
+  display:inline-flex;
+  align-items:center;
+  gap:.35rem;
+}
+
+/* OJO: alpha correcto 0.08 */
+.nav-dd-btn:hover{
+  background:rgba(37,99,235,0.08);
+  color:var(--primary);
+}
+
+.nav-dd.active .nav-dd-btn{
+  background:rgba(37,99,235,0.12);
+  color:var(--primary);
+}
+
+.nav-dd-caret{
+  font-size:.75rem;
+  opacity:.85;
+}
+
+/* MENU: glass */
+.nav-dd-menu{
+  position:absolute;
+  top:calc(100% + 10px);
+  left:0;
+  z-index:200;
+
+  min-width:240px;
+
+  /* glass */
+  background:rgba(255,255,255,0.72);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+
+  border:1px solid rgba(255,255,255,0.35);
+  border-radius:1rem;
+  box-shadow: 0 18px 45px rgba(0,0,0,0.18);
+
+  padding:.45rem;
+  display:none;
+}
+
+.nav-dd.open .nav-dd-menu{ display:block; }
+
+.nav-dd-item{
+  display:block;
+  padding:.6rem .8rem;
+  border-radius:.8rem;
+  text-decoration:none;
+
+  color:#0f172a; /* texto más legible sobre glass */
+  font-weight:800;
+  font-size:.9rem;
+
+  transition: background .15s ease, transform .05s ease;
+}
+
+.nav-dd-item:hover{
+  background:rgba(37,99,235,0.10);
+}
+
+.nav-dd-item:active{
+  transform: scale(0.99);
+}
+
+.nav-dd-item.active{
+  background:rgba(37,99,235,0.16);
+  color: #0b1220;
+}
