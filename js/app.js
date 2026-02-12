@@ -93,6 +93,8 @@ function niceTitle(key) {
     notas: "notas",
     reportes: "reportes",
     login: "inicio de sesión",
+    perfil: "mi perfil",
+    auditoria: "auditoría",
   };
   return map[key] || key;
 }
@@ -201,6 +203,7 @@ function shell(me, active, contentHtml) {
   const showMatriculas = hasAnyPerm(me, "matriculas");
   const showNotas      = hasAnyPerm(me, "notas");
   const showReportes   = hasAnyPerm(me, "reportes") || hasAnyPerm(me, "horarios");
+  const showEstudiantes = hasAnyPerm(me, "estudiantes");
 
   const navLink = (id, label, show) => show ? `
     <a class="nav-link ${active === id ? "active" : ""}" href="#${id}">${escapeHtml(label)}</a>
@@ -243,24 +246,27 @@ function shell(me, active, contentHtml) {
         </div>
       </div>
 
-      <nav class="topnav" aria-label="navegación">
-        <a class="nav-link ${active === "dashboard" ? "active" : ""}" href="#dashboard">Inicio</a>
+<nav class="topnav" aria-label="navegación">
+  <a class="nav-link ${active === "dashboard" ? "active" : ""}" href="#dashboard">Inicio</a>
 
-        ${navLink("usuarios", "Usuarios", showUsuarios)}
+  ${navLink("usuarios", "Usuarios", showUsuarios)}
+  ${navLink("estudiantes", "Estudiantes", showEstudiantes)}
+  
+  ${navDropdown("roles_dd", "Roles", (showRoles || showPermisos), [
+    ...(showRoles ? [{ id: "roles", label: "Crear / Ver roles" }] : []),
+    ...(showPermisos ? [{ id: "permisos", label: "Asignar permisos" }] : []),
+  ])}
 
-        ${navDropdown("roles_dd", "Roles", (showRoles || showPermisos), [
-          ...(showRoles ? [{ id: "roles", label: "Crear / Ver roles" }] : []),
-          ...(showPermisos ? [{ id: "permisos", label: "Asignar permisos" }] : []),
-        ])}
+  ${navLink("cursos", "Cursos", showCursos)}
+  ${navLink("matriculas", "Matriculación", showMatriculas)}
+  ${navLink("notas", "Notas", showNotas)}
 
-        ${navLink("cursos", "Cursos", showCursos)}
-        ${navLink("matriculas", "Matriculación", showMatriculas)}
-        ${navLink("notas", "Notas", showNotas)}
+  ${navDropdown("reportes_dd", "Reportes", showReportes, [
+    { id: "reportes", label: "Reportes" },
+  ])}
 
-        ${navDropdown("reportes_dd", "Reportes", showReportes, [
-          { id: "reportes", label: "Reportes" },
-        ])}
-      </nav>
+  ${navLink("auditoria", "Auditoría", me?.is_admin || hasAnyPerm(me, "auditoria"))}
+</nav>
 
       <div class="topbar-right">
         <div class="datetime-display" aria-label="fecha y hora">
@@ -340,6 +346,37 @@ function loginView(msg = "") {
     </div>
   `);
 
+
+
+// ====== bloqueo por intentos fallidos (cliente) ======
+// Nota: el bloqueo real debe aplicarse también en backend; aquí solo evitamos spam del login.
+const LOGIN_MAX_FAILS = 3;
+const LOGIN_LOCK_MINUTES = 10;
+const loginKey = (u) => `login_fail_${String(u || "").toLowerCase()}`;
+const readLoginState = (u) => {
+  try {
+    const raw = localStorage.getItem(loginKey(u));
+    const obj = raw ? JSON.parse(raw) : null;
+    return (obj && typeof obj === "object") ? obj : { count: 0, lockedUntil: 0 };
+  } catch { return { count: 0, lockedUntil: 0 }; }
+};
+const writeLoginState = (u, st) => {
+  try { localStorage.setItem(loginKey(u), JSON.stringify(st)); } catch {}
+};
+const clearLoginState = (u) => {
+  try { localStorage.removeItem(loginKey(u)); } catch {}
+};
+const isLocked = (u) => {
+  const st = readLoginState(u);
+  return st.lockedUntil && Date.now() < Number(st.lockedUntil || 0);
+};
+const lockInfoText = (u) => {
+  const st = readLoginState(u);
+  const ms = Math.max(0, Number(st.lockedUntil || 0) - Date.now());
+  const min = Math.ceil(ms / 60000);
+  return `usuario bloqueado temporalmente (${min} min).`;
+};
+
   const doLogin = async () => {
     const usuario = ($("#usuario").value || "").trim();
     const password = ($("#password").value || "").trim();
@@ -349,11 +386,35 @@ function loginView(msg = "") {
       return;
     }
 
-    const r = await Api.login(usuario, password);
-    if (!r.ok) {
-      $("#msg").innerHTML = msgBox("info", r.error || "error");
-      return;
-    }
+
+if (isLocked(usuario)) {
+  $("#msg").innerHTML = msgBox("info", lockInfoText(usuario));
+  return;
+}
+
+const r = await Api.login(usuario, password);
+if (!r.ok) {
+  const st = readLoginState(usuario);
+  const nextCount = Number(st.count || 0) + 1;
+
+  let lockedUntil = Number(st.lockedUntil || 0);
+  if (nextCount >= LOGIN_MAX_FAILS) {
+    lockedUntil = Date.now() + (LOGIN_LOCK_MINUTES * 60_000);
+  }
+
+  writeLoginState(usuario, { count: nextCount, lockedUntil });
+
+  const left = Math.max(0, LOGIN_MAX_FAILS - nextCount);
+  const extra = lockedUntil && Date.now() < lockedUntil
+    ? ` - ${lockInfoText(usuario)}`
+    : (left > 0 ? ` - intentos restantes: ${left}` : "");
+
+  $("#msg").innerHTML = msgBox("info", (r.error || "error") + extra);
+  return;
+}
+
+clearLoginState(usuario);
+
 
     location.hash = "#dashboard";
     router();
@@ -387,6 +448,9 @@ async function viewDashboard(me) {
   pushCard(hasAnyPerm(me, "matriculas"), "matriculas", "Matriculación", "matricula con validación de choques.");
   pushCard(hasAnyPerm(me, "notas"), "notas", "Notas", "ingreso de notas por curso.");
   pushCard(hasAnyPerm(me, "reportes") || hasAnyPerm(me, "horarios"), "reportes", "Reportes", "horario y notas.");
+  pushCard(hasAnyPerm(me, "estudiantes"), "estudiantes", "Estudiantes", "gestiona estudiantes del sistema.");
+  pushCard(me?.tipo === "ESTUDIANTE", "perfil", "Mi perfil", "actualiza tus datos y contraseña.");
+  pushCard(me?.is_admin || hasAnyPerm(me, "auditoria"), "auditoria", "Auditoría", "consulta los registros de auditoría.");
 
   setView(shell(me, "dashboard", `
     <div class="dashboard-container fade-in">
@@ -542,6 +606,9 @@ function showEditUserModal(me, user, roles, onSave) {
   });
 }
 
+/* =========================
+   usuarios - SOLO FILTROS (sin búsqueda)
+   ========================= */
 async function viewUsuarios(me) {
   if (!hasAnyPerm(me, "usuarios")) { location.hash = "#dashboard"; return router(); }
 
@@ -565,33 +632,27 @@ async function viewUsuarios(me) {
             <label>usuario</label>
             <input id="u_usuario" class="form-control" placeholder="ej: juan.perez" />
           </div>
-
           <div class="form-group">
             <label>nombres</label>
             <input id="u_nombres" class="form-control" placeholder="juan felipe" />
           </div>
-
           <div class="form-group">
             <label>apellidos</label>
             <input id="u_apellidos" class="form-control" placeholder="gutierrez vargas" />
           </div>
-
           <div class="form-group">
             <label>cédula</label>
             <input id="u_cedula" class="form-control" placeholder="10 dígitos" maxlength="10" />
           </div>
-
           <div class="form-group">
             <label>fecha de nacimiento</label>
             <input id="u_fnac" class="form-control" type="date" />
             <small class="hint" id="u_edad_hint"></small>
           </div>
-
           <div class="form-group">
             <label>contraseña</label>
             <input id="u_pass" class="form-control" type="password" placeholder="mínimo 8 caracteres" />
           </div>
-
           ${me.is_admin ? `
           <div class="form-group">
             <label>rol (opcional)</label>
@@ -607,6 +668,24 @@ async function viewUsuarios(me) {
       ` : `<div class="message info">no tienes permiso para crear usuarios</div>`}
 
       ${canList ? `
+      <!-- ===== FILTROS ===== -->
+      <div class="form-container" style="margin-bottom:15px; padding:15px;">
+        <div style="display:flex; gap:15px; align-items:flex-end; flex-wrap:wrap;">
+          <div style="min-width:200px;">
+            <label>estado</label>
+            <select id="uEstadoFilter" class="form-control select">
+              <option value="">todos</option>
+              <option value="1">activo</option>
+              <option value="0">inactivo</option>
+            </select>
+          </div>
+          <div>
+            <button class="btn btn-primary" id="btnFiltrarUsuarios">filtrar</button>
+            <button class="btn btn-outline" id="btnLimpiarFiltros">limpiar</button>
+          </div>
+        </div>
+      </div>
+
       <div class="table-container">
         <table class="data-table">
           <thead>
@@ -633,15 +712,12 @@ async function viewUsuarios(me) {
   `));
 
   bindTopbarDropdowns();
-
   $("#btnLogout").onclick = logoutTotal;
   startClock();
 
-  function msg(text) {
-    $("#uMsg").innerHTML = msgBox("info", text);
-    setTimeout(() => ($("#uMsg").innerHTML = ""), 3500);
-  }
+  function msg(text) { $("#uMsg").innerHTML = msgBox("info", text); setTimeout(() => ($("#uMsg").innerHTML = ""), 3500); }
 
+  // ===== CREAR USUARIO =====
   if (canCreate) {
     $("#u_fnac").addEventListener("change", () => {
       const e = calcEdad($("#u_fnac").value);
@@ -659,7 +735,6 @@ async function viewUsuarios(me) {
 
       if (!usuario || !nombres || !apellidos || !cedula || !fecha_nacimiento || !password) return msg("complete todos los campos");
       if (cedula.length !== 10) return msg("la cédula debe tener 10 dígitos");
-
       const edad = calcEdad(fecha_nacimiento);
       if (edad === null) return msg("fecha de nacimiento inválida");
       if (edad < 18) return msg("solo mayores de edad (18+)");
@@ -673,111 +748,122 @@ async function viewUsuarios(me) {
 
       const r = await Api.usuarios_create(payload);
       msg(r.ok ? "usuario creado" : (r.error || "error"));
-
       if (r.ok) {
-        $("#u_usuario").value = "";
-        $("#u_nombres").value = "";
-        $("#u_apellidos").value = "";
-        $("#u_cedula").value = "";
-        $("#u_fnac").value = "";
-        const h = $("#u_edad_hint");
-        if (h) h.textContent = "";
-        $("#u_pass").value = "";
-        if ($("#u_rol")) $("#u_rol").value = "";
-        USERS_CACHE.loaded = false; // refrescar cache
+        $("#u_usuario").value = ""; $("#u_nombres").value = ""; $("#u_apellidos").value = "";
+        $("#u_cedula").value = ""; $("#u_fnac").value = ""; 
+        const h = $("#u_edad_hint"); if (h) h.textContent = "";
+        $("#u_pass").value = ""; if ($("#u_rol")) $("#u_rol").value = "";
+        USERS_CACHE.loaded = false;
         if (canList) cargarUsuarios();
       }
     };
   }
 
-  let usersData = [];
-  let uPage = 1;
-  const perPage = 6;
+  // ===== FILTROS Y PAGINACIÓN =====
+  if (canList) {
+    let usersData = [];
+    let filteredUsers = [];
+    let uPage = 1;
+    const perPage = 6;
+    let estadoFilter = "";
 
-  function renderUsersPage() {
-    const out = paginate(usersData, uPage, perPage);
-    uPage = out.page;
+    async function cargarUsuarios() {
+      const params = new URLSearchParams();
+      if (estadoFilter !== "") params.append("estado", estadoFilter);
 
-    $("#uTableBody").innerHTML = out.slice.map(u => {
-      const edad = calcEdad(u.fecha_nacimiento);
-      const disEdit = !canEdit;
-      const disDel = !canDelete;
+      const r = await Api.usuarios_list(params.toString() ? `?${params.toString()}` : null);
+      if (!r.ok) {
+        $("#uTableBody").innerHTML = `<tr><td colspan="9" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
+        return;
+      }
 
-      return `
-        <tr>
-          <td><strong>#${escapeHtml(u.id)}</strong></td>
-          <td><strong>${escapeHtml(u.usuario)}</strong></td>
-          <td>${escapeHtml(u.nombres || "")}</td>
-          <td>${escapeHtml(u.apellidos || "")}</td>
-          <td>${escapeHtml(u.cedula || "")}</td>
-          <td>${edad === null ? "-" : edad}</td>
-          <td>${escapeHtml(u.rol_nombre || "(sin rol)")}</td>
-          <td>
-            <span class="status-badge ${Number(u.activo) ? "status-active" : "status-inactive"}">
-              ${Number(u.activo) ? "activo" : "inactivo"}
-            </span>
-          </td>
-          <td>
-            <div class="actions-container">
-              <button class="btn btn-outline btn-sm" data-edit="${u.id}" ${disEdit ? "disabled" : ""} type="button">editar</button>
-              <button class="btn btn-outline btn-sm" data-del="${u.id}" ${disDel ? "disabled" : ""} type="button">eliminar</button>
-            </div>
-          </td>
-        </tr>
-      `;
-    }).join("");
-
-    $$("[data-del]").forEach(b => {
-      if (b.disabled) return;
-      b.onclick = async () => {
-        if (!canDelete) return msg("sin permiso para eliminar");
-        if (!confirm("desactivar usuario?")) return;
-        const id = Number(b.dataset.del);
-        const rr = await Api.usuarios_delete({ id });
-        msg(rr.ok ? "usuario desactivado" : (rr.error || "error"));
-        if (rr.ok) { USERS_CACHE.loaded = false; cargarUsuarios(); }
-      };
-    });
-
-    $$("[data-edit]").forEach(b => {
-      if (b.disabled) return;
-      b.onclick = async () => {
-        if (!canEdit) return msg("sin permiso para editar");
-        const id = Number(b.dataset.edit);
-        const user = usersData.find(x => Number(x.id) === id);
-        if (!user) return;
-        showEditUserModal(me, user, roles, async () => { USERS_CACHE.loaded = false; await cargarUsuarios(); });
-      };
-    });
-
-    renderPager("#uPager", uPage, out.totalPages, (p) => {
-      uPage = p;
+      usersData = Array.isArray(r.data) ? r.data : [];
+      filteredUsers = usersData;
+      uPage = 1;
       renderUsersPage();
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    });
-  }
-
-  async function cargarUsuarios() {
-    if (!canList) return;
-
-    const r = await Api.usuarios_list();
-    if (!r.ok) {
-      $("#uTableBody").innerHTML = `<tr><td colspan="9" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
-      return;
     }
 
-    usersData = Array.isArray(r.data) ? r.data : [];
-    if (usersData.length === 0) {
-      $("#uTableBody").innerHTML = `<tr><td colspan="9" class="td-center">sin usuarios</td></tr>`;
-      $("#uPager").innerHTML = "";
-      return;
+    function renderUsersPage() {
+      const out = paginate(filteredUsers, uPage, perPage);
+      uPage = out.page;
+
+      $("#uTableBody").innerHTML = out.slice.length ? out.slice.map(u => {
+        const edad = calcEdad(u.fecha_nacimiento);
+        const disEdit = !canEdit;
+        const disDel = !canDelete;
+
+        return `
+          <tr>
+            <td><strong>#${escapeHtml(u.id)}</strong></td>
+            <td><strong>${escapeHtml(u.usuario)}</strong></td>
+            <td>${escapeHtml(u.nombres || "")}</td>
+            <td>${escapeHtml(u.apellidos || "")}</td>
+            <td>${escapeHtml(u.cedula || "")}</td>
+            <td>${edad === null ? "-" : edad}</td>
+            <td>${escapeHtml(u.rol_nombre || "(sin rol)")}</td>
+            <td>
+              <span class="status-badge ${Number(u.activo) ? "status-active" : "status-inactive"}">
+                ${Number(u.activo) ? "activo" : "inactivo"}
+              </span>
+            </td>
+            <td>
+              <div class="actions-container">
+                <button class="btn btn-outline btn-sm" data-edit="${u.id}" ${disEdit ? "disabled" : ""} type="button">editar</button>
+                <button class="btn btn-outline btn-sm" data-del="${u.id}" ${disDel ? "disabled" : ""} type="button">eliminar</button>
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join("") : `<tr><td colspan="9" class="td-center">no hay usuarios</td></tr>`;
+
+      $$("[data-del]").forEach(b => {
+        if (b.disabled) return;
+        b.onclick = async () => {
+          if (!canDelete) return msg("sin permiso para eliminar");
+          if (!confirm("desactivar usuario?")) return;
+          const id = Number(b.dataset.del);
+          const rr = await Api.usuarios_delete({ id });
+          msg(rr.ok ? "usuario desactivado" : (rr.error || "error"));
+          if (rr.ok) { USERS_CACHE.loaded = false; cargarUsuarios(); }
+        };
+      });
+
+      $$("[data-edit]").forEach(b => {
+        if (b.disabled) return;
+        b.onclick = async () => {
+          if (!canEdit) return msg("sin permiso para editar");
+          const id = Number(b.dataset.edit);
+          const user = usersData.find(x => Number(x.id) === id);
+          if (!user) return;
+          showEditUserModal(me, user, roles, async () => { USERS_CACHE.loaded = false; await cargarUsuarios(); });
+        };
+      });
+
+      renderPager("#uPager", uPage, out.totalPages, (p) => {
+        uPage = p;
+        renderUsersPage();
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      });
     }
 
-    uPage = 1;
-    renderUsersPage();
-  }
+    // ✅ BOTONES DE FILTRO - AHORA SÍ FUNCIONAN
+    if ($("#btnFiltrarUsuarios")) {
+      $("#btnFiltrarUsuarios").onclick = () => {
+        estadoFilter = $("#uEstadoFilter")?.value || "";
+        cargarUsuarios();
+      };
+    }
 
-  cargarUsuarios();
+    if ($("#btnLimpiarFiltros")) {
+      $("#btnLimpiarFiltros").onclick = () => {
+        if ($("#uEstadoFilter")) $("#uEstadoFilter").value = "";
+        estadoFilter = "";
+        cargarUsuarios();
+      };
+    }
+
+    cargarUsuarios();
+  }
 }
 
 /* ===================== ROLES ===================== */
@@ -845,7 +931,7 @@ async function viewRoles(me) {
 
   let rolesData = [];
   let rPage = 1;
-  const perPage = 6;
+  const perPage = 4;
 
   function renderRolesPage() {
     const out = paginate(rolesData, rPage, perPage);
@@ -1081,6 +1167,9 @@ async function viewPermisos(me) {
 /* =========================
    cursos (MEJORADO: asignar docente por select + cédula)
    ========================= */
+/* =========================
+   cursos - CON PAGINACIÓN
+   ========================= */
 async function viewCursos(me) {
   if (!hasAnyPerm(me, "cursos")) { location.hash="#dashboard"; return router(); }
 
@@ -1094,31 +1183,28 @@ async function viewCursos(me) {
 
       ${canCreate ? `
       <div class="form-container">
-        <h3>crear curso</h3>
+        <h3>crear curso (online)</h3>
         <div class="form-grid">
-          <div class="form-group">
+          <div class="form-group" style="grid-column: 1 / -1;">
             <label>nombre</label>
-            <input id="c_nombre" class="form-control" placeholder="ej: matemáticas" />
+            <input id="c_nombre" class="form-control" placeholder="ej: programación web" />
+          </div>
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label>descripción</label>
+            <textarea id="c_desc" class="form-control" rows="3" placeholder="breve descripción del curso"></textarea>
           </div>
           <div class="form-group">
-            <label>paralelo</label>
-            <input id="c_paralelo" class="form-control" value="A" />
+            <label>duración (semanas)</label>
+            <input id="c_dur" class="form-control" type="number" min="1" max="52" value="4" />
           </div>
           <div class="form-group">
-            <label>periodo</label>
-            <input id="c_periodo" class="form-control" placeholder="ej: 2026-1" />
+            <label>costo</label>
+            <input id="c_costo" class="form-control" type="number" step="0.01" min="0" value="0" />
           </div>
-
           <div class="form-group">
             <label>docente (opcional)</label>
             <select id="c_docente_sel" class="form-control select"></select>
           </div>
-
-          <div class="form-group">
-            <label>cédula del docente (opcional)</label>
-            <input id="c_docente_ced" class="form-control" placeholder="10 dígitos" maxlength="10" />
-          </div>
-
           <div class="form-group">
             <label>día</label>
             <select id="c_dia" class="form-control select">
@@ -1135,12 +1221,7 @@ async function viewCursos(me) {
             <label>hora fin</label>
             <input id="c_hf" class="form-control" value="08:00" />
           </div>
-          <div class="form-group">
-            <label>aula</label>
-            <input id="c_aula" class="form-control" placeholder="ej: B-203" />
-          </div>
         </div>
-
         <div class="modal-actions" style="justify-content:flex-start; gap:10px;">
           <button class="btn btn-primary" id="btnCrearC" type="button">crear</button>
           <button class="btn btn-outline" id="btnRefDoc" type="button">recargar docentes</button>
@@ -1154,50 +1235,59 @@ async function viewCursos(me) {
             <tr>
               <th>id</th>
               <th>curso</th>
-              <th>paralelo</th>
-              <th>periodo</th>
+              <th>duración</th>
+              <th>costo</th>
               <th>docente</th>
               <th>horario</th>
-              <th>aula</th>
               <th>acciones</th>
             </tr>
           </thead>
           <tbody id="cTableBody">
-            <tr><td colspan="8" class="td-center">cargando...</td></tr>
+            <tr><td colspan="7" class="td-center">cargando...</td></tr>
           </tbody>
         </table>
       </div>
+      <div id="cPager" class="pager-wrap"></div>
     </div>
   `));
 
   bindTopbarDropdowns();
-
   $("#btnLogout").onclick = logoutTotal;
   startClock();
 
   const setMsg = (t, okk=false) => { $("#cMsg").innerHTML = msgBox(okk ? "success" : "info", t); };
 
-  // cargar docentes para el select
+  // cargar docentes
   let docentes = [];
   async function loadDocentes(force=false) {
     const all = await ensureUsersCache(force);
     if (!all) { setMsg("no se pudo cargar usuarios para docentes"); return; }
-    // preferimos rol docente; si no hay, mostramos todos para no bloquear
     docentes = all.filter(u => roleKind(u) === "docente" && Number(u.activo) === 1);
     if (docentes.length === 0) docentes = all.filter(u => Number(u.activo) === 1);
-
-    fillUserSelect($("#c_docente_sel"), docentes, "sin docente");
-    bindCedulaPicker($("#c_docente_ced"), docentes, (u) => { $("#c_docente_sel").value = String(u.id); });
+    if ($("#c_docente_sel")) fillUserSelect($("#c_docente_sel"), docentes, "sin docente");
   }
+
+  // PAGINACIÓN
+  let allCursos = [];
+  let currentPage = 1;
+  const perPage = 4;
 
   async function loadCursos() {
     const r = await Api.cursos_list();
     if (!r.ok) {
-      $("#cTableBody").innerHTML = `<tr><td colspan="8" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
+      $("#cTableBody").innerHTML = `<tr><td colspan="7" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
       return;
     }
-    const rows = r.rows || r.data || [];
-    $("#cTableBody").innerHTML = rows.length ? rows.map(x => {
+    allCursos = r.rows || r.data || [];
+    currentPage = 1;
+    renderCursosPage();
+  }
+
+  function renderCursosPage() {
+    const out = paginate(allCursos, currentPage, perPage);
+    currentPage = out.page;
+
+    $("#cTableBody").innerHTML = out.slice.length ? out.slice.map(x => {
       const docente = x.docente_nombre ? escapeHtml(x.docente_nombre) : (x.docente_id ? `#${escapeHtml(x.docente_id)}` : "-");
       const horario = `${escapeHtml(diaNombre(x.dia_semana))} ${escapeHtml(x.hora_inicio)}-${escapeHtml(x.hora_fin)}`;
       const acciones = `
@@ -1207,17 +1297,20 @@ async function viewCursos(me) {
       return `
         <tr>
           <td>${escapeHtml(x.id)}</td>
-          <td><strong>${escapeHtml(x.nombre)}</strong></td>
-          <td>${escapeHtml(x.paralelo)}</td>
-          <td>${escapeHtml(x.periodo)}</td>
+          <td>
+            <strong>${escapeHtml(x.nombre)}</strong>
+            ${x.descripcion ? `<div class="hint" style="margin-top:4px;">${escapeHtml(x.descripcion)}</div>` : ""}
+          </td>
+          <td>${escapeHtml(x.duracion_semanas)} sem</td>
+          <td>$${escapeHtml(Number(x.costo ?? 0).toFixed(2))}</td>
           <td>${docente}</td>
           <td>${horario}</td>
-          <td>${escapeHtml(x.aula || "-")}</td>
           <td><div class="actions-container">${acciones || "-"}</div></td>
         </tr>
       `;
-    }).join("") : `<tr><td colspan="8" class="td-center">sin cursos</td></tr>`;
+    }).join("") : `<tr><td colspan="7" class="td-center">sin cursos</td></tr>`;
 
+    // Eventos
     $$("#cTableBody [data-del]").forEach(b => {
       b.onclick = async () => {
         const id = Number(b.dataset.del);
@@ -1231,37 +1324,39 @@ async function viewCursos(me) {
     $$("#cTableBody [data-edit]").forEach(b => {
       b.onclick = async () => {
         const id = Number(b.dataset.edit);
-        const row = rows.find(z => Number(z.id) === id);
+        const row = allCursos.find(z => Number(z.id) === id);
         if (!row) return;
 
-        // editar básico por prompts (incluye docente_id)
         const nombre = prompt("nombre:", row.nombre); if (nombre === null) return;
-        const paralelo = prompt("paralelo:", row.paralelo); if (paralelo === null) return;
-        const periodo = prompt("periodo:", row.periodo); if (periodo === null) return;
-
-        // aquí mejor: permite poner docente_id directamente o dejar vacío
+        const descripcion = prompt("descripción:", row.descripcion ?? ""); if (descripcion === null) return;
+        const duracion_semanas = prompt("duración (semanas):", row.duracion_semanas ?? 4); if (duracion_semanas === null) return;
+        const costo = prompt("costo:", row.costo ?? 0); if (costo === null) return;
         const docente_id = prompt("docente_id (vacío = sin docente):", row.docente_id ?? ""); if (docente_id === null) return;
-
         const dia_semana = prompt("día (1=lun..7=dom):", row.dia_semana); if (dia_semana === null) return;
         const hora_inicio = prompt("hora inicio (HH:MM):", row.hora_inicio); if (hora_inicio === null) return;
         const hora_fin = prompt("hora fin (HH:MM):", row.hora_fin); if (hora_fin === null) return;
-        const aula = prompt("aula:", row.aula ?? ""); if (aula === null) return;
 
         const rr = await Api.cursos_update({
           id,
           nombre: nombre.trim(),
-          paralelo: paralelo.trim(),
-          periodo: periodo.trim(),
+          descripcion: descripcion.trim(),
+          duracion_semanas: Number(duracion_semanas),
+          costo: Number(costo),
           docente_id: (docente_id.trim() === "" ? "" : Number(docente_id)),
           dia_semana: Number(dia_semana),
           hora_inicio: hora_inicio.trim(),
           hora_fin: hora_fin.trim(),
-          aula: aula.trim()
         });
 
         setMsg(rr.ok ? "curso actualizado" : (rr.error || "error"), rr.ok);
         if (rr.ok) loadCursos();
       };
+    });
+
+    renderPager("#cPager", currentPage, out.totalPages, (p) => {
+      currentPage = p;
+      renderCursosPage();
+      window.scrollTo({ top: 0, behavior: "smooth" });
     });
   }
 
@@ -1279,17 +1374,18 @@ async function viewCursos(me) {
   if (canCreate && $("#btnCrearC")) {
     $("#btnCrearC").onclick = async () => {
       const nombre = $("#c_nombre").value.trim();
-      const paralelo = $("#c_paralelo").value.trim() || "A";
-      const periodo = $("#c_periodo").value.trim();
+      const descripcion = $("#c_desc").value.trim();
+      const duracion_semanas = Number($("#c_dur").value);
+      const costo = Number($("#c_costo").value);
       const docenteSel = $("#c_docente_sel") ? $("#c_docente_sel").value : "";
       const dia_semana = Number($("#c_dia").value);
       const hora_inicio = $("#c_hi").value.trim();
       const hora_fin = $("#c_hf").value.trim();
-      const aula = $("#c_aula").value.trim();
 
-      if (!nombre || !periodo) { setMsg("complete nombre y periodo"); return; }
+      if (!nombre) { setMsg("complete el nombre"); return; }
+      if (!duracion_semanas || duracion_semanas < 1) { setMsg("duración inválida"); return; }
 
-      const payload = { nombre, paralelo, periodo, dia_semana, hora_inicio, hora_fin, aula };
+      const payload = { nombre, descripcion, duracion_semanas, costo, dia_semana, hora_inicio, hora_fin };
       if (docenteSel !== "") payload.docente_id = Number(docenteSel);
 
       const rr = await Api.cursos_create(payload);
@@ -1297,8 +1393,9 @@ async function viewCursos(me) {
 
       if (rr.ok) {
         $("#c_nombre").value = "";
-        $("#c_aula").value = "";
-        $("#c_docente_ced").value = "";
+        $("#c_desc").value = "";
+        $("#c_dur").value = "4";
+        $("#c_costo").value = "0";
         if ($("#c_docente_sel")) $("#c_docente_sel").value = "";
         await loadCursos();
       }
@@ -1306,9 +1403,7 @@ async function viewCursos(me) {
   }
 }
 
-/* =========================
-   matriculación (MEJORADO: select estudiante + búsqueda por cédula)
-   ========================= */
+
 async function viewMatriculas(me) {
   if (!hasAnyPerm(me, "matriculas")) { location.hash="#dashboard"; return router(); }
 
@@ -1320,20 +1415,10 @@ async function viewMatriculas(me) {
       <div id="mMsg"></div>
 
       <div class="form-container">
-        <h3>matricular</h3>
+        <h3>matrículas</h3>
 
         <div class="form-grid">
           <div class="form-group" style="grid-column: 1 / -1;">
-            <label>estudiante</label>
-            <select id="m_est_sel" class="form-control select"></select>
-          </div>
-
-          <div class="form-group">
-            <label>cédula (búsqueda rápida)</label>
-            <input id="m_est_ced" class="form-control" placeholder="10 dígitos" maxlength="10" />
-          </div>
-
-          <div class="form-group">
             <label>curso</label>
             <select id="m_curso" class="form-control select"></select>
           </div>
@@ -1342,22 +1427,19 @@ async function viewMatriculas(me) {
         <div class="modal-actions" style="justify-content:flex-start; gap:10px;">
           <button class="btn btn-primary" id="btnMatricular" type="button" ${canCreate ? "" : "disabled"}>matricular</button>
           <button class="btn btn-outline" id="btnAnular" type="button" ${canAnular ? "" : "disabled"}>anular</button>
-          <button class="btn btn-outline" id="btnRefEst" type="button">recargar estudiantes</button>
         </div>
-
+        <small class="hint">se matricula/anula el estudiante que inició sesión.</small>
       </div>
 
       <div class="table-container" style="margin-top: 1rem;">
-        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px;">
-          <h3 style="margin:0;">matrículas activas</h3>
-        </div>
+        <h3 style="margin:0 0 8px 0;">mi horario</h3>
         <table class="data-table">
           <thead>
             <tr>
-              <th>periodo</th><th>curso</th><th>paralelo</th><th>día</th><th>hora</th><th>aula</th><th>docente</th>
+              <th>curso</th><th>día</th><th>hora</th><th>docente</th>
             </tr>
           </thead>
-          <tbody id="mHorarioBody"><tr><td colspan="7" class="td-center">elige un estudiante</td></tr></tbody>
+          <tbody id="mHorarioBody"><tr><td colspan="4" class="td-center">cargando...</td></tr></tbody>
         </table>
         <div id="mChoques" style="margin-top:10px;"></div>
       </div>
@@ -1376,69 +1458,33 @@ async function viewMatriculas(me) {
   const cursos = (r.ok ? (r.rows || r.data || []) : []);
   const selCurso = $("#m_curso");
   selCurso.innerHTML = cursos.map(c => {
-    const label = `${c.periodo} - ${c.nombre} ${c.paralelo} (${diaNombre(c.dia_semana)} ${c.hora_inicio}-${c.hora_fin})`;
+    const label = `${c.nombre} (${diaNombre(c.dia_semana)} ${c.hora_inicio}-${c.hora_fin})`;
     return `<option value="${c.id}">${escapeHtml(label)}</option>`;
   }).join("") || `<option value="">sin cursos</option>`;
 
-  // estudiantes
-  let estudiantes = [];
-  async function loadEstudiantes(force=false) {
-    const all = await ensureUsersCache(force);
-    if (!all) { setMsg("no se pudo cargar usuarios para estudiantes"); return; }
-
-    estudiantes = all.filter(u => roleKind(u) === "estudiante" && Number(u.activo) === 1);
-    if (estudiantes.length === 0) estudiantes = all.filter(u => Number(u.activo) === 1); // fallback
-
-    fillUserSelect($("#m_est_sel"), estudiantes, "selecciona estudiante");
-    bindCedulaPicker($("#m_est_ced"), estudiantes, (u) => { $("#m_est_sel").value = String(u.id); });
-  }
-
-  await loadEstudiantes(false);
-  const getSelectedEstudianteId = () => Number($("#m_est_sel")?.value || 0);
-
-  await refreshHorario();
-
-  $("#btnRefEst").onclick = async () => {
-    USERS_CACHE.loaded = false;
-    await loadEstudiantes(true);
-    setMsg("estudiantes recargados", true);
-  };
-
   function detectarChoques(rows) {
-    // choque si mismo periodo + mismo día + traslape de horas
     const choques = [];
     for (let i=0; i<rows.length; i++) {
       for (let j=i+1; j<rows.length; j++) {
         const a = rows[i], b = rows[j];
-        if (String(a.periodo) !== String(b.periodo)) continue;
         if (Number(a.dia_semana) !== Number(b.dia_semana)) continue;
         const a1 = String(a.hora_inicio||"");
         const a2 = String(a.hora_fin||"");
         const b1 = String(b.hora_inicio||"");
         const b2 = String(b.hora_fin||"");
-        if (a1 < b2 && b1 < a2) {
-          choques.push([a,b]);
-        }
+        if (a1 < b2 && b1 < a2) choques.push([a,b]);
       }
     }
     return choques;
   }
 
   async function refreshHorario() {
-    const estudiante_id = getSelectedEstudianteId();
     const body = $("#mHorarioBody");
     const msg = $("#mChoques");
-    if (!body) return;
 
-    if (!estudiante_id) {
-      body.innerHTML = `<tr><td colspan="7" class="td-center">elige un estudiante</td></tr>`;
-      if (msg) msg.innerHTML = "";
-      return;
-    }
-
-    const r = await Api.matriculas_list_estudiante(estudiante_id);
+    const r = await Api.matriculas_list_mi();
     if (!r.ok) {
-      body.innerHTML = `<tr><td colspan="7" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
+      body.innerHTML = `<tr><td colspan="4" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
       if (msg) msg.innerHTML = "";
       return;
     }
@@ -1446,53 +1492,42 @@ async function viewMatriculas(me) {
     const rows = r.rows || r.data || [];
     body.innerHTML = rows.length ? rows.map(x => `
       <tr>
-        <td>${escapeHtml(x.periodo)}</td>
-        <td>${escapeHtml(x.nombre)}</td>
-        <td>${escapeHtml(x.paralelo)}</td>
+        <td><strong>${escapeHtml(x.nombre)}</strong></td>
         <td>${escapeHtml(diaNombre(x.dia_semana))}</td>
         <td>${escapeHtml(x.hora_inicio)}-${escapeHtml(x.hora_fin)}</td>
-        <td>${escapeHtml(x.aula || "-")}</td>
         <td>${escapeHtml((x.docente_nombre || "").trim() || "-")}</td>
       </tr>
-    `).join("") : `<tr><td colspan="7" class="td-center">sin matrículas activas</td></tr>`;
+    `).join("") : `<tr><td colspan="4" class="td-center">sin matrículas activas</td></tr>`;
 
     const choques = detectarChoques(rows);
     if (msg) {
       msg.innerHTML = choques.length
-        ? msgBox("info", `ojo: se detectaron ${choques.length} choque(s) de horario (mismo periodo y día con traslape).`)
+        ? msgBox("info", `ojo: se detectaron ${choques.length} choque(s) de horario (mismo día con traslape).`)
         : "";
     }
   }
 
-  $("#m_est_sel").onchange = refreshHorario;
-  if ($("#btnVerHorarioEst")) $("#btnVerHorarioEst").onclick = refreshHorario;
+  await refreshHorario();
 
   $("#btnMatricular").onclick = async () => {
     if (!canCreate) return;
-
-    const estudiante_id = getSelectedEstudianteId();
     const curso_id = Number(selCurso.value);
-
-    if (!estudiante_id || !curso_id) { setMsg("elige estudiante y curso"); return; }
-
-    const rr = await Api.matriculas_create({ curso_id, estudiante_id });
+    if (!curso_id) { setMsg("elige un curso"); return; }
+    const rr = await Api.matriculas_create({ curso_id });
     setMsg(rr.ok ? "matrícula registrada" : (rr.error || "error"), rr.ok);
     if (rr.ok) await refreshHorario();
   };
 
   $("#btnAnular").onclick = async () => {
     if (!canAnular) return;
-
-    const estudiante_id = getSelectedEstudianteId();
     const curso_id = Number(selCurso.value);
-
-    if (!estudiante_id || !curso_id) { setMsg("elige estudiante y curso"); return; }
-
-    const rr = await Api.matriculas_anular({ curso_id, estudiante_id });
+    if (!curso_id) { setMsg("elige un curso"); return; }
+    const rr = await Api.matriculas_anular({ curso_id });
     setMsg(rr.ok ? "matrícula anulada" : (rr.error || "error"), rr.ok);
     if (rr.ok) await refreshHorario();
   };
 }
+
 
 /* =========================
    notas
@@ -1501,27 +1536,10 @@ async function viewNotas(me) {
   if (!hasAnyPerm(me, "notas")) { location.hash = "#dashboard"; return router(); }
 
   const canEdit = hasPerm(me, "notas", "editar");
+  const PER_PAGE = 6;
 
-  const W = {
-    p1_deberes: 4, p1_prueba: 5, p1_lab: 4, p1_examen: 7,
-    p2_deberes: 4, p2_prueba: 5, p2_lab: 4, p2_examen: 7,
-    p3_deberes: 4, p3_prueba: 5, p3_lab: 4, p3_examen: 7,
-  };
-
-  const PER_PAGE = 2;
   const clamp = (n, a, b) => Math.min(b, Math.max(a, n));
   const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
-
-  function storedToUI(stored, weight) {
-    const s = Number(stored);
-    if (!isFinite(s) || !weight) return 0;
-    return round2(clamp((s / weight) * 20, 0, 20));
-  }
-  function uiToStored(ui, weight) {
-    const u = Number(ui);
-    if (!isFinite(u) || !weight) return 0;
-    return round2(clamp((u / 20) * weight, 0, weight));
-  }
 
   setView(shell(me, "notas", `
     <div class="dashboard-container fade-in">
@@ -1553,9 +1571,9 @@ async function viewNotas(me) {
           <thead>
             <tr>
               <th>estudiante</th>
-              <th>p1</th>
-              <th>p2</th>
-              <th>p3</th>
+              <th>p1 (0-20)</th>
+              <th>p2 (0-20)</th>
+              <th>p3 (0-20)</th>
               <th>final</th>
               <th>estado</th>
               <th>supletorio</th>
@@ -1574,21 +1592,16 @@ async function viewNotas(me) {
   `));
 
   bindTopbarDropdowns();
-
   $("#btnLogout").onclick = logoutTotal;
   startClock();
 
-  const setMsg = (t, okk = false) => {
-    $("#nMsg").innerHTML = msgBox(okk ? "success" : "info", t);
-  };
+  const setMsg = (t, okk = false) => { $("#nMsg").innerHTML = msgBox(okk ? "success" : "info", t); };
 
   function renderPagerSimple(containerSel, page, totalPages, onPage) {
     const el = $(containerSel);
     if (!el) return;
-
     const disabledPrev = page <= 1 ? "disabled" : "";
     const disabledNext = page >= totalPages ? "disabled" : "";
-
     el.innerHTML = `
       <div class="pager" style="display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap;">
         <button class="btn btn-outline" id="nPrevBtn" type="button" ${disabledPrev}>anterior</button>
@@ -1598,20 +1611,18 @@ async function viewNotas(me) {
         <button class="btn btn-outline" id="nNextBtn" type="button" ${disabledNext}>siguiente</button>
       </div>
     `;
-
     const prevBtn = $("#nPrevBtn");
     const nextBtn = $("#nNextBtn");
     if (prevBtn) prevBtn.onclick = () => { if (page > 1) onPage(page - 1); };
     if (nextBtn) nextBtn.onclick = () => { if (page < totalPages) onPage(page + 1); };
   }
 
-  // ===== cargar cursos =====
   const cursosRes = await Api.mis_cursos();
   const cursos = cursosRes.ok ? (cursosRes.rows || cursosRes.data || []) : [];
   const sel = $("#n_curso");
 
   sel.innerHTML = cursos.map(c => {
-    const label = `${c.periodo} - ${c.nombre} ${c.paralelo}`;
+    const label = `${c.nombre} (${diaNombre(c.dia_semana)} ${c.hora_inicio}-${c.hora_fin})`;
     return `<option value="${c.id}">${escapeHtml(label)}</option>`;
   }).join("") || `<option value="">sin cursos</option>`;
 
@@ -1619,46 +1630,37 @@ async function viewNotas(me) {
   let currentPage = 1;
 
   function filterEstudiantes() {
-    const searchTerm = ($("#nSearchInput")?.value || "").toLowerCase().trim();
-    if (!searchTerm) return allEstudiantes;
-
+    const t = ($("#nSearchInput")?.value || "").toLowerCase().trim();
+    if (!t) return allEstudiantes;
     return allEstudiantes.filter(x => {
       const nombre = `${x.apellidos || ""} ${x.nombres || ""}`.toLowerCase();
       const usuario = (x.usuario || "").toLowerCase();
       const cedula = (x.cedula || "").toLowerCase();
-      return nombre.includes(searchTerm) || usuario.includes(searchTerm) || cedula.includes(searchTerm);
+      return nombre.includes(t) || usuario.includes(t) || cedula.includes(t);
     });
   }
 
-  function updateCount(filtered, total) {
-    const countEl = $("#studentsCount");
-    if (!countEl) return;
-    countEl.textContent = (filtered === total)
-      ? `mostrando ${total} estudiantes`
-      : `mostrando ${filtered} de ${total} estudiantes`;
+  function calcularPromedio(p1, p2, p3) {
+    return round2((Number(p1 || 0) + Number(p2 || 0) + Number(p3 || 0)) / 3);
   }
 
-  // UI (0..20) -> guardado ponderado (0..peso). Supletorio se queda 0..20.
+  function tieneDerecho(promedio) {
+    return promedio >= 10 && promedio < 14;
+  }
+
   function saveCurrentPageEdits() {
-    $$("#nTableBody .n-inp").forEach(i => {
-      const eid = Number(i.dataset.e);
-      const k = i.dataset.k;
-      const raw = String(i.value ?? "").trim().replace(",", ".");
+    $$("#nTableBody .n-inp").forEach(inp => {
+      const eid = Number(inp.dataset.e || 0);
+      const k = inp.dataset.k;
+      const raw = String(inp.value ?? "").trim().replace(",", ".");
       const v = raw === "" ? null : Number(raw);
-
-      const est = allEstudiantes.find(e => e.estudiante_id === eid);
+      const est = allEstudiantes.find(e => Number(e.estudiante_id) === eid);
       if (!est) return;
-
       if (k === "supletorio_nota") {
         est.supletorio_nota = (v === null || !isFinite(v)) ? null : clamp(v, 0, 20);
         return;
       }
-
-      const w = W[k] || 0;
-      if (!w) return;
-
-      const uiVal = (!isFinite(v) || v === null) ? 0 : clamp(v, 0, 20);
-      est[k] = uiToStored(uiVal, w);
+      est[k] = (v === null || !isFinite(v)) ? 0 : round2(clamp(v, 0, 20));
     });
   }
 
@@ -1669,25 +1671,6 @@ async function viewNotas(me) {
     return { page: safePage, totalPages, slice: list.slice(start, start + pp) };
   }
 
-  // si cambia cualquier actividad normal, resetea supletorio (frontend)
-  function bindResetSupletorioOnChange() {
-    $$("#nTableBody .n-inp").forEach(inp => {
-      const k = inp.dataset.k;
-      if (k === "supletorio_nota") return;
-
-      inp.addEventListener("input", () => {
-        const eid = Number(inp.dataset.e);
-        const est = allEstudiantes.find(e => e.estudiante_id === eid);
-        if (!est) return;
-
-        est.supletorio_nota = null;
-
-        const su = $(`#nTableBody .n-inp[data-e="${eid}"][data-k="supletorio_nota"]`);
-        if (su) su.value = "";
-      });
-    });
-  }
-
   function renderEstudiantes() {
     saveCurrentPageEdits();
 
@@ -1695,95 +1678,67 @@ async function viewNotas(me) {
     const { page, totalPages, slice } = paginateLocal(filtered, currentPage, PER_PAGE);
     currentPage = page;
 
-    updateCount(filtered.length, allEstudiantes.length);
-
     if (!slice.length) {
       $("#nTableBody").innerHTML = `<tr><td colspan="7" class="td-center">sin estudiantes encontrados</td></tr>`;
       renderPagerSimple("#nPagerContainer", 1, 1, () => {});
       return;
     }
 
-    const inpItemUI20 = (label, k, storedVal, step = "0.01") => {
-      const w = W[k] || 0;
-      const uiVal = storedToUI(storedVal ?? 0, w);
-      return `
-        <div class="mini-item">
-          <small class="mini-label">${escapeHtml(label)}</small>
-          <input
-            class="form-control n-inp"
-            type="number"
-            step="${step}"
-            min="0"
-            max="20"
-            ${canEdit ? "" : "disabled"}
-            data-e="{{EID}}"
-            data-k="${k}"
-            value="${escapeHtml(uiVal)}"
-          />
-        </div>
-      `;
-    };
+    const inp20 = (eid, k, val, placeholder="", disabled = false) => `
+      <input class="form-control n-inp" type="number" step="0.01" min="0" max="20"
+        ${canEdit && !disabled ? "" : "disabled"}
+        data-e="${eid}" data-k="${k}"
+        value="${escapeHtml(val ?? "")}" placeholder="${escapeHtml(placeholder)}" />
+    `;
+
+    const soloLectura = (val) => `
+      <input class="form-control" type="number" step="0.01" 
+        disabled
+        value="${escapeHtml(val ?? "")}" />
+    `;
 
     $("#nTableBody").innerHTML = slice.map(x => {
+      const eid = Number(x.estudiante_id);
       const nombre = `${x.apellidos || ""} ${x.nombres || ""}`.trim() || x.usuario || "estudiante";
-
-      const p1 = `
-        <div class="mini-grid">
-          ${inpItemUI20("Deberes", "p1_deberes", x.p1_deberes).replace("{{EID}}", x.estudiante_id)}
-          ${inpItemUI20("Prueba",  "p1_prueba",  x.p1_prueba ).replace("{{EID}}", x.estudiante_id)}
-          ${inpItemUI20("Lab",     "p1_lab",     x.p1_lab    ).replace("{{EID}}", x.estudiante_id)}
-          ${inpItemUI20("Examen",  "p1_examen",  x.p1_examen ).replace("{{EID}}", x.estudiante_id)}
-        </div>
-        <small class="hint">total (ponderado): ${escapeHtml(x.p1_total ?? "0.00")}</small>
-      `;
-
-      const p2 = `
-        <div class="mini-grid">
-          ${inpItemUI20("Deberes", "p2_deberes", x.p2_deberes).replace("{{EID}}", x.estudiante_id)}
-          ${inpItemUI20("Prueba",  "p2_prueba",  x.p2_prueba ).replace("{{EID}}", x.estudiante_id)}
-          ${inpItemUI20("Lab",     "p2_lab",     x.p2_lab    ).replace("{{EID}}", x.estudiante_id)}
-          ${inpItemUI20("Examen",  "p2_examen",  x.p2_examen ).replace("{{EID}}", x.estudiante_id)}
-        </div>
-        <small class="hint">total (ponderado): ${escapeHtml(x.p2_total ?? "0.00")}</small>
-      `;
-
-      const p3 = `
-        <div class="mini-grid">
-          ${inpItemUI20("deberes", "p3_deberes", x.p3_deberes).replace("{{EID}}", x.estudiante_id)}
-          ${inpItemUI20("prueba",  "p3_prueba",  x.p3_prueba ).replace("{{EID}}", x.estudiante_id)}
-          ${inpItemUI20("lab",     "p3_lab",     x.p3_lab    ).replace("{{EID}}", x.estudiante_id)}
-          ${inpItemUI20("examen",  "p3_examen",  x.p3_examen ).replace("{{EID}}", x.estudiante_id)}
-        </div>
-        <small class="hint">total (ponderado): ${escapeHtml(x.p3_total ?? "0.00")}</small>
-      `;
-
+      
+      const p1 = Number(x.p1_total || 0);
+      const p2 = Number(x.p2_total || 0);
+      const p3 = Number(x.p3_total || 0);
+      const promedioActual = calcularPromedio(p1, p2, p3);
+      
       const estado = (x.estado ?? "REPROBADO");
       const estadoClass =
         estado === "APROBADO" ? "status-active" :
         estado === "SUPLETORIO" ? "status-warning" :
         "status-inactive";
 
-      const supletorioCell = (estado === "SUPLETORIO")
-        ? `<input class="form-control n-inp" type="number" step="0.01" min="0" max="20"
-              ${canEdit ? "" : "disabled"}
-              data-e="${x.estudiante_id}" data-k="supletorio_nota"
-              value="${escapeHtml(x.supletorio_nota ?? "")}" placeholder="0–20" />`
-        : `<span class="hint">—</span>`;
+      const tieneSupletorioGuardado = (x.supletorio_nota !== null && x.supletorio_nota !== undefined && x.supletorio_nota !== "");
+      const derechoActual = tieneDerecho(promedioActual);
+      
+      let supletorioCell = `<span class="hint">—</span>`;
+      
+      if (tieneSupletorioGuardado) {
+        if (derechoActual) {
+          supletorioCell = inp20(eid, "supletorio_nota", x.supletorio_nota, "0–20", false);
+        } else {
+          supletorioCell = soloLectura(x.supletorio_nota);
+        }
+      } else if (derechoActual) {
+        supletorioCell = inp20(eid, "supletorio_nota", "", "0–20", false);
+      }
 
       return `
         <tr>
           <td>${escapeHtml(nombre)}</td>
-          <td>${p1}</td>
-          <td>${p2}</td>
-          <td>${p3}</td>
-          <td>${escapeHtml(x.nota_final ?? "0.00")}</td>
+          <td>${inp20(eid, "p1_total", p1, "", false)}</td>
+          <td>${inp20(eid, "p2_total", p2, "", false)}</td>
+          <td>${inp20(eid, "p3_total", p3, "", false)}</td>
+          <td><strong>${escapeHtml(x.nota_final ?? "0.00")}</strong></td>
           <td><span class="status-badge ${estadoClass}">${escapeHtml(estado)}</span></td>
           <td>${supletorioCell}</td>
         </tr>
       `;
     }).join("");
-
-    bindResetSupletorioOnChange();
 
     renderPagerSimple("#nPagerContainer", currentPage, totalPages, (p) => {
       currentPage = p;
@@ -1796,7 +1751,6 @@ async function viewNotas(me) {
     if (!curso_id) {
       $("#nTableBody").innerHTML = `<tr><td colspan="7" class="td-center">sin curso</td></tr>`;
       renderPagerSimple("#nPagerContainer", 1, 1, () => {});
-      updateCount(0, 0);
       return;
     }
 
@@ -1804,7 +1758,6 @@ async function viewNotas(me) {
     if (!r.ok) {
       $("#nTableBody").innerHTML = `<tr><td colspan="7" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
       renderPagerSimple("#nPagerContainer", 1, 1, () => {});
-      updateCount(0, 0);
       return;
     }
 
@@ -1816,7 +1769,6 @@ async function viewNotas(me) {
   sel.onchange = loadEstudiantes;
   $("#btnRecargarNotas").onclick = loadEstudiantes;
 
-  // buscador con debounce
   let searchTimeout;
   const searchInput = $("#nSearchInput");
   if (searchInput) {
@@ -1839,34 +1791,22 @@ async function viewNotas(me) {
 
     saveCurrentPageEdits();
 
-    // enviamos actividades ya ponderadas (0..peso), supletorio sobre 20
     const items = allEstudiantes.map(est => ({
-      estudiante_id: est.estudiante_id,
-
-      p1_deberes: est.p1_deberes ?? 0,
-      p1_prueba:  est.p1_prueba  ?? 0,
-      p1_lab:     est.p1_lab     ?? 0,
-      p1_examen:  est.p1_examen  ?? 0,
-
-      p2_deberes: est.p2_deberes ?? 0,
-      p2_prueba:  est.p2_prueba  ?? 0,
-      p2_lab:     est.p2_lab     ?? 0,
-      p2_examen:  est.p2_examen  ?? 0,
-
-      p3_deberes: est.p3_deberes ?? 0,
-      p3_prueba:  est.p3_prueba  ?? 0,
-      p3_lab:     est.p3_lab     ?? 0,
-      p3_examen:  est.p3_examen  ?? 0,
-
-      supletorio_nota: (est.supletorio_nota === null || est.supletorio_nota === undefined)
+      estudiante_id: Number(est.estudiante_id),
+      p1_total: round2(clamp(Number(est.p1_total ?? 0), 0, 20)),
+      p2_total: round2(clamp(Number(est.p2_total ?? 0), 0, 20)),
+      p3_total: round2(clamp(Number(est.p3_total ?? 0), 0, 20)),
+      supletorio_nota: (est.supletorio_nota === null || est.supletorio_nota === undefined || est.supletorio_nota === "")
         ? null
-        : clamp(est.supletorio_nota, 0, 20),
+        : round2(clamp(Number(est.supletorio_nota), 0, 20)),
     }));
 
     const rr = await Api.guardar_notas({ curso_id, items });
     setMsg(rr.ok ? "notas guardadas correctamente" : (rr.error || "error"), rr.ok);
 
-    if (rr.ok) await loadEstudiantes();
+    if (rr.ok) {
+      await loadEstudiantes();
+    }
   };
 }
 
@@ -1874,27 +1814,42 @@ async function viewNotas(me) {
    reportes
    ========================= */
 async function viewReportes(me) {
-  if (!(hasAnyPerm(me, "reportes") || hasAnyPerm(me, "horarios"))) { location.hash="#dashboard"; return router(); }
+  if (!(hasAnyPerm(me, "reportes") || hasAnyPerm(me, "horarios"))) {
+    location.hash = "#dashboard";
+    return router();
+  }
 
-  const canHor = hasPerm(me, "horarios", "ver");
-  const canRep = hasPerm(me, "reportes", "ver");
+  const esEstudiante = me?.tipo === "ESTUDIANTE";
+  const esDocente = me?.rol_nombre?.toLowerCase().includes("docente") || me?.is_admin;
+  const esAdmin = me?.is_admin;
 
   setView(shell(me, "reportes", `
     <div class="dashboard-container fade-in">
       <div id="repMsg"></div>
 
       <div class="form-container">
-        <h3>reportes</h3>
-        <div class="modal-actions" style="justify-content:flex-start; gap:10px;">
-          <button class="btn btn-primary" id="btnHorarioDoc" type="button" ${canHor ? "" : "disabled"}>horario docente</button>
-          <button class="btn btn-outline" id="btnNotasEst" type="button" ${canRep ? "" : "disabled"}>mis notas (estudiante)</button>
+        <h3>reportes académicos</h3>
+
+        <div style="display:flex; gap:10px; margin-bottom:20px; flex-wrap:wrap;">
+          ${esEstudiante ? `
+            <button class="btn btn-primary" id="btnMisNotas">mis notas</button>
+            <button class="btn btn-outline" id="btnMiHorario">mi horario</button>
+          ` : ''}
+
+          ${esDocente || esAdmin ? `
+            <button class="btn btn-primary" id="btnHorarioDoc">mi horario</button>
+            <button class="btn btn-outline" id="btnMisCursos">mis cursos</button>
+          ` : ''}
         </div>
-        <small class="hint">por ahora se muestra en tabla (json). pdf lo conectamos después.</small>
+
+        <div id="cursoSelectorContainer" style="margin-top:10px; display:none;"></div>
       </div>
 
       <div class="table-container">
         <table class="data-table">
-          <thead id="repHead"></thead>
+          <thead id="repHead">
+            <tr><th>reporte</th></tr>
+          </thead>
           <tbody id="repBody">
             <tr><td class="td-center">selecciona un reporte</td></tr>
           </tbody>
@@ -1904,62 +1859,1020 @@ async function viewReportes(me) {
   `));
 
   bindTopbarDropdowns();
-
   $("#btnLogout").onclick = logoutTotal;
   startClock();
 
-  const setMsg = (t, okk=false) => { $("#repMsg").innerHTML = msgBox(okk ? "success" : "info", t); };
+  const setMsg = (t, okk = false) => {
+    const boxType = okk ? "success" : "info";
+    $("#repMsg").innerHTML = msgBox(boxType, t);
+  };
 
   function setTable(headHtml, bodyHtml) {
     $("#repHead").innerHTML = headHtml;
     $("#repBody").innerHTML = bodyHtml;
   }
 
-  $("#btnHorarioDoc").onclick = async () => {
-    if (!canHor) return;
-    const r = await Api.reporte_horario_docente();
-    if (!r.ok) { setMsg(r.error || "error"); return; }
-    const rows = r.rows || r.data || [];
-    setTable(`
-      <tr>
-        <th>periodo</th><th>curso</th><th>paralelo</th><th>día</th><th>hora</th><th>aula</th>
-      </tr>
-    `, rows.length ? rows.map(x => `
-      <tr>
-        <td>${escapeHtml(x.periodo)}</td>
-        <td>${escapeHtml(x.nombre)}</td>
-        <td>${escapeHtml(x.paralelo)}</td>
-        <td>${escapeHtml(diaNombre(x.dia_semana))}</td>
-        <td>${escapeHtml(x.hora_inicio)}-${escapeHtml(x.hora_fin)}</td>
-        <td>${escapeHtml(x.aula || "-")}</td>
-      </tr>
-    `).join("") : `<tr><td colspan="7" class="td-center">sin datos</td></tr>`);
-  };
+  // ============================================
+  // REPORTE 1: NOTAS DEL ESTUDIANTE
+  // ============================================
+  if ($("#btnMisNotas")) {
+    $("#btnMisNotas").onclick = async () => {
+      if (!hasPerm(me, "reportes", "ver")) return;
 
-  $("#btnNotasEst").onclick = async () => {
-    if (!canRep) return;
-    const r = await Api.reporte_notas_estudiante();
+      $("#cursoSelectorContainer").style.display = "none";
+
+      const r = await Api.reporte_notas_estudiante();
+      if (!r.ok) { setMsg(r.error || "error"); return; }
+
+      const rows = r.rows || r.data || [];
+      if (!rows.length) {
+        setTable(
+          `<tr><th>mensaje</th></tr>`,
+          `<tr><td class="td-center">no estás matriculado en ningún curso</td></tr>`
+        );
+        return;
+      }
+
+      const headHtml = `
+        <tr>
+          <th>curso</th>
+          <th>docente</th>
+          <th>horario</th>
+          <th>p1</th>
+          <th>p2</th>
+          <th>p3</th>
+          <th>final</th>
+          <th>estado</th>
+          <th>supletorio</th>
+        </tr>
+      `;
+
+      const bodyHtml = rows.map(x => {
+        const estado = (x.estado || "").toUpperCase();
+        const estadoClass =
+          estado === "APROBADO" ? "status-active" :
+          estado === "SUPLETORIO" ? "status-warning" :
+          "status-inactive";
+
+        const horario = `${diaNombre(x.dia_semana)} ${x.hora_inicio || "00:00"}-${x.hora_fin || "00:00"}`;
+
+        const p1 = Number(x.p1_total ?? 0).toFixed(2);
+        const p2 = Number(x.p2_total ?? 0).toFixed(2);
+        const p3 = Number(x.p3_total ?? 0).toFixed(2);
+        const nf = Number(x.nota_final ?? 0).toFixed(2);
+
+        return `
+          <tr>
+            <td><strong>${escapeHtml(x.nombre)}</strong></td>
+            <td>${escapeHtml(x.docente_nombre || "-")}</td>
+            <td>${escapeHtml(horario)}</td>
+            <td>${escapeHtml(p1)}</td>
+            <td>${escapeHtml(p2)}</td>
+            <td>${escapeHtml(p3)}</td>
+            <td><strong>${escapeHtml(nf)}</strong></td>
+            <td><span class="status-badge ${estadoClass}">${escapeHtml(estado || "REPROBADO")}</span></td>
+            <td>${x.supletorio_nota != null && x.supletorio_nota !== ""
+              ? escapeHtml(Number(x.supletorio_nota).toFixed(2))
+              : '<span class="hint">—</span>'}
+            </td>
+          </tr>
+        `;
+      }).join("");
+
+      setTable(headHtml, bodyHtml);
+    };
+  }
+
+  // ============================================
+  // REPORTE 2: HORARIO DEL ESTUDIANTE
+  // ============================================
+  if ($("#btnMiHorario")) {
+    $("#btnMiHorario").onclick = async () => {
+      if (!hasPerm(me, "horarios", "ver") && !hasPerm(me, "reportes", "ver")) return;
+
+      $("#cursoSelectorContainer").style.display = "none";
+
+      const r = await Api.matriculas_list_mi();
+      if (!r.ok) { setMsg(r.error || "error"); return; }
+
+      const rows = r.rows || r.data || [];
+      if (!rows.length) {
+        setTable(
+          `<tr><th>mensaje</th></tr>`,
+          `<tr><td class="td-center">no estás matriculado en ningún curso</td></tr>`
+        );
+        return;
+      }
+
+      const headHtml = `
+        <tr>
+          <th>curso</th>
+          <th>día</th>
+          <th>hora</th>
+          <th>docente</th>
+        </tr>
+      `;
+
+      const bodyHtml = rows.map(x => `
+        <tr>
+          <td><strong>${escapeHtml(x.nombre)}</strong></td>
+          <td>${escapeHtml(diaNombre(x.dia_semana))}</td>
+          <td>${escapeHtml(x.hora_inicio || "00:00")}-${escapeHtml(x.hora_fin || "00:00")}</td>
+          <td>${escapeHtml(x.docente_nombre || "-")}</td>
+        </tr>
+      `).join("");
+
+      setTable(headHtml, bodyHtml);
+    };
+  }
+
+  // ============================================
+  // REPORTE 3: HORARIO DEL DOCENTE
+  // ============================================
+  if ($("#btnHorarioDoc")) {
+    $("#btnHorarioDoc").onclick = async () => {
+      if (!hasPerm(me, "horarios", "ver") && !hasPerm(me, "reportes", "ver")) return;
+
+      $("#cursoSelectorContainer").style.display = "none";
+
+      const r = await Api.reporte_horario_docente();
+      if (!r.ok) { setMsg(r.error || "error"); return; }
+
+      const rows = r.rows || r.data || [];
+      if (!rows.length) {
+        setTable(
+          `<tr><th>mensaje</th></tr>`,
+          `<tr><td class="td-center">no tienes cursos asignados</td></tr>`
+        );
+        return;
+      }
+
+      const headHtml = `
+        <tr>
+          <th>curso</th>
+          <th>día</th>
+          <th>hora</th>
+        </tr>
+      `;
+
+      const bodyHtml = rows.map(x => `
+        <tr>
+          <td><strong>${escapeHtml(x.nombre)}</strong></td>
+          <td>${escapeHtml(diaNombre(x.dia_semana))}</td>
+          <td>${escapeHtml(x.hora_inicio || "00:00")}-${escapeHtml(x.hora_fin || "00:00")}</td>
+        </tr>
+      `).join("");
+
+      setTable(headHtml, bodyHtml);
+    };
+  }
+
+  // ============================================
+  // REPORTE 4: CURSOS DEL DOCENTE + SELECT PARA VER NOTAS
+  // ============================================
+  if ($("#btnMisCursos")) {
+    $("#btnMisCursos").onclick = async () => {
+      if (!hasPerm(me, "reportes", "ver")) return;
+
+      const r = await Api.reporte_cursos_docente();
+      if (!r.ok) { setMsg(r.error || "error"); return; }
+
+      const rows = r.rows || r.data || [];
+      if (!rows.length) {
+        setTable(
+          `<tr><th>mensaje</th></tr>`,
+          `<tr><td class="td-center">no tienes cursos asignados</td></tr>`
+        );
+        $("#cursoSelectorContainer").style.display = "none";
+        return;
+      }
+
+      // select de cursos
+      const selectContainer = $("#cursoSelectorContainer");
+      selectContainer.style.display = "block";
+
+      let selectHtml = `
+        <label style="display:block; margin-bottom:5px;"><strong>seleccionar curso para ver notas:</strong></label>
+        <select id="selectCursoNotas" class="form-control select" style="max-width:420px;">
+          <option value="">-- seleccione un curso --</option>
+          ${rows.map(c => `<option value="${c.id}">${escapeHtml(c.nombre)} (${c.total_estudiantes || 0} estudiantes)</option>`).join("")}
+        </select>
+      `;
+      selectContainer.innerHTML = selectHtml;
+
+      // tabla “mis cursos”
+      const headHtml = `
+        <tr>
+          <th>curso</th>
+          <th>horario</th>
+          <th>docente</th>
+          <th>estudiantes</th>
+        </tr>
+      `;
+
+      const bodyHtml = rows.map(x => `
+        <tr>
+          <td><strong>${escapeHtml(x.nombre)}</strong></td>
+          <td>${escapeHtml(diaNombre(x.dia_semana))} ${escapeHtml(x.hora_inicio || "00:00")}-${escapeHtml(x.hora_fin || "00:00")}</td>
+          <td>${escapeHtml(x.docente_nombre || me?.nombre || "-")}</td>
+          <td>${escapeHtml(x.total_estudiantes || 0)}</td>
+        </tr>
+      `).join("");
+
+      setTable(headHtml, bodyHtml);
+      setMsg(`tienes ${rows.length} cursos`, true);
+
+      $("#selectCursoNotas").onchange = async function () {
+        const curso_id = Number(this.value);
+        if (!curso_id) return;
+        await verNotasCurso(curso_id);
+      };
+    };
+  }
+
+  // ============================================
+  // FUNCIÓN: VER NOTAS DE UN CURSO (DOCENTE)
+  // ============================================
+  async function verNotasCurso(curso_id) {
+    const r = await Api.reporte_notas_curso_docente(curso_id);
     if (!r.ok) { setMsg(r.error || "error"); return; }
+
     const rows = r.rows || r.data || [];
-    setTable(`
+    if (!rows.length) {
+      setTable(
+        `<tr><th>mensaje</th></tr>`,
+        `<tr><td class="td-center">no hay estudiantes matriculados en este curso</td></tr>`
+      );
+      return;
+    }
+
+    const headHtml = `
       <tr>
-        <th>periodo</th><th>curso</th><th>paralelo</th><th>p1</th><th>p2</th><th>p3</th><th>final</th><th>estado</th>
+        <th>#</th>
+        <th>cédula</th>
+        <th>apellidos</th>
+        <th>nombres</th>
+        <th>p1</th>
+        <th>p2</th>
+        <th>p3</th>
+        <th>final</th>
+        <th>estado</th>
+        <th>supletorio</th>
       </tr>
-    `, rows.length ? rows.map(x => `
-      <tr>
-        <td>${escapeHtml(x.periodo)}</td>
-        <td>${escapeHtml(x.nombre)}</td>
-        <td>${escapeHtml(x.paralelo)}</td>
-        <td>${escapeHtml(x.p1_total ?? "0.00")}</td>
-        <td>${escapeHtml(x.p2_total ?? "0.00")}</td>
-        <td>${escapeHtml(x.p3_total ?? "0.00")}</td>
-        <td>${escapeHtml(x.nota_final ?? "0.00")}</td>
-        <td>${escapeHtml(x.estado ?? "-")}</td>
-      </tr>
-    `).join("") : `<tr><td colspan="8" class="td-center">sin datos</td></tr>`);
-  };
+    `;
+
+    const bodyHtml = rows.map((x, i) => {
+      const estado = (x.estado || "").toUpperCase();
+      const estadoClass =
+        estado === "APROBADO" ? "status-active" :
+        estado === "SUPLETORIO" ? "status-warning" :
+        "status-inactive";
+
+      const p1 = Number(x.p1_total ?? 0).toFixed(2);
+      const p2 = Number(x.p2_total ?? 0).toFixed(2);
+      const p3 = Number(x.p3_total ?? 0).toFixed(2);
+      const nf = Number(x.nota_final ?? 0).toFixed(2);
+
+      return `
+        <tr>
+          <td>${i + 1}</td>
+          <td>${escapeHtml(x.cedula || "-")}</td>
+          <td>${escapeHtml(x.apellidos || "")}</td>
+          <td>${escapeHtml(x.nombres || "")}</td>
+          <td>${escapeHtml(p1)}</td>
+          <td>${escapeHtml(p2)}</td>
+          <td>${escapeHtml(p3)}</td>
+          <td><strong>${escapeHtml(nf)}</strong></td>
+          <td><span class="status-badge ${estadoClass}">${escapeHtml(estado || "REPROBADO")}</span></td>
+          <td>${x.supletorio_nota != null && x.supletorio_nota !== ""
+            ? escapeHtml(Number(x.supletorio_nota).toFixed(2))
+            : '<span class="hint">—</span>'}
+          </td>
+        </tr>
+      `;
+    }).join("");
+
+    setTable(headHtml, bodyHtml);
+    setMsg(`mostrando ${rows.length} estudiantes`, true);
+  }
 }
 
+
+
+async function viewEstudiantes(me) {
+  if (!hasAnyPerm(me, "estudiantes")) { location.hash = "#dashboard"; return router(); }
+
+  const canList = hasPerm(me, "estudiantes", "ver");
+  const canCreate = hasPerm(me, "estudiantes", "crear");
+  const canEdit = hasPerm(me, "estudiantes", "editar");
+  const canDelete = hasPerm(me, "estudiantes", "eliminar");
+
+  setView(shell(me, "estudiantes", `
+    <div class="dashboard-container fade-in">
+      <div id="estMsg"></div>
+
+      ${canCreate ? `
+      <div class="form-container">
+        <h3>crear estudiante</h3>
+        <div class="form-grid">
+          <div class="form-group">
+            <label>nombres</label>
+            <input id="est_nombres" class="form-control" placeholder="ej: juan carlos" />
+          </div>
+
+          <div class="form-group">
+            <label>apellidos</label>
+            <input id="est_apellidos" class="form-control" placeholder="ej: pérez garcía" />
+          </div>
+
+          <div class="form-group">
+            <label>cédula</label>
+            <input id="est_cedula" class="form-control" placeholder="10 dígitos" maxlength="10" />
+          </div>
+
+          <div class="form-group">
+            <label>fecha de nacimiento</label>
+            <input id="est_fnac" class="form-control" type="date" />
+            <small class="hint" id="est_edad_hint"></small>
+          </div>
+
+          <div class="form-group">
+            <label>correo</label>
+            <input id="est_correo" class="form-control" type="email" placeholder="ejemplo@mail.com" />
+          </div>
+
+          <div class="form-group">
+            <label>teléfono</label>
+            <input id="est_telefono" class="form-control" placeholder="0987654321" />
+          </div>
+
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+              <input type="checkbox" id="est_crear_cuenta" style="width: auto;" />
+              <span>crear cuenta de acceso al sistema</span>
+            </label>
+            <small class="hint">usuario y contraseña será la cédula</small>
+          </div>
+        </div>
+        <button class="btn btn-primary" id="btnCrearEst" type="button">crear</button>
+      </div>
+      ` : `<div class="message info">no tienes permiso para crear estudiantes</div>`}
+
+      ${canList ? `
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>id</th>
+              <th>cédula</th>
+              <th>nombres</th>
+              <th>apellidos</th>
+              <th>edad</th>
+              <th>correo</th>
+              <th>teléfono</th>
+              <th>cuenta</th>
+              <th>estado</th>
+              <th>acciones</th>
+            </tr>
+          </thead>
+          <tbody id="estTableBody">
+            <tr><td colspan="10" class="td-center">cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div id="estPager" class="pager-wrap"></div>
+      ` : `<div class="message info">no tienes permiso para ver estudiantes</div>`}
+    </div>
+  `));
+
+  bindTopbarDropdowns();
+  $("#btnLogout").onclick = logoutTotal;
+  startClock();
+
+  function msg(text) {
+    $("#estMsg").innerHTML = msgBox("info", text);
+    setTimeout(() => ($("#estMsg").innerHTML = ""), 3500);
+  }
+
+  if (canCreate) {
+    $("#est_fnac").addEventListener("change", () => {
+      const e = calcEdad($("#est_fnac").value);
+      const h = $("#est_edad_hint");
+      if (h) h.textContent = e === null ? "" : `edad: ${e}`;
+    });
+
+    $("#btnCrearEst").onclick = async () => {
+      const nombres = $("#est_nombres").value.trim();
+      const apellidos = $("#est_apellidos").value.trim();
+      const cedula = onlyDigits($("#est_cedula").value);
+      const fecha_nacimiento = $("#est_fnac").value;
+      const correo = $("#est_correo").value.trim();
+      const telefono = onlyDigits($("#est_telefono").value);
+      const crear_cuenta = $("#est_crear_cuenta").checked ? 1 : 0;
+
+      if (!nombres || !apellidos || !cedula || !fecha_nacimiento) {
+        return msg("complete los campos obligatorios");
+      }
+      if (cedula.length !== 10) return msg("la cédula debe tener 10 dígitos");
+
+      const edad = calcEdad(fecha_nacimiento);
+      if (edad === null) return msg("fecha de nacimiento inválida");
+
+      const payload = {
+        nombres,
+        apellidos,
+        cedula,
+        fecha_nacimiento,
+        correo,
+        telefono,
+        crear_cuenta
+      };
+
+      const r = await Api.estudiantes_create(payload);
+      msg(r.ok ? "estudiante creado correctamente" : (r.error || "error"));
+
+      if (r.ok) {
+        $("#est_nombres").value = "";
+        $("#est_apellidos").value = "";
+        $("#est_cedula").value = "";
+        $("#est_fnac").value = "";
+        $("#est_correo").value = "";
+        $("#est_telefono").value = "";
+        $("#est_crear_cuenta").checked = false;
+        const h = $("#est_edad_hint");
+        if (h) h.textContent = "";
+        if (canList) cargarEstudiantes();
+      }
+    };
+  }
+
+  let estudiantesData = [];
+  let estPage = 1;
+  const perPage = 4;
+
+  function renderEstudiantesPage() {
+    const out = paginate(estudiantesData, estPage, perPage);
+    estPage = out.page;
+
+    $("#estTableBody").innerHTML = out.slice.map(est => {
+      const edad = calcEdad(est.fecha_nacimiento);
+      const disEdit = !canEdit;
+      const disDel = !canDelete;
+
+      return `
+        <tr>
+          <td><strong>#${escapeHtml(est.id)}</strong></td>
+          <td>${escapeHtml(est.cedula || "")}</td>
+          <td>${escapeHtml(est.nombres || "")}</td>
+          <td>${escapeHtml(est.apellidos || "")}</td>
+          <td>${edad === null ? "-" : edad}</td>
+          <td>${escapeHtml(est.correo || "-")}</td>
+          <td>${escapeHtml(est.telefono || "-")}</td>
+          <td>
+            ${est.cuenta_usuario ? 
+              `<span class="status-badge status-active">${escapeHtml(est.cuenta_usuario)}</span>` : 
+              `<span class="hint">sin cuenta</span>`
+            }
+          </td>
+          <td>
+            <span class="status-badge ${Number(est.activo) ? "status-active" : "status-inactive"}">
+              ${Number(est.activo) ? "activo" : "inactivo"}
+            </span>
+          </td>
+          <td>
+            <div class="actions-container">
+              <button class="btn btn-outline btn-sm" data-edit="${est.id}" ${disEdit ? "disabled" : ""} type="button">editar</button>
+              <button class="btn btn-outline btn-sm" data-del="${est.id}" ${disDel ? "disabled" : ""} type="button">desactivar</button>
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join("");
+
+    $$("[data-del]").forEach(b => {
+      if (b.disabled) return;
+      b.onclick = async () => {
+        if (!canDelete) return msg("sin permiso para eliminar");
+        if (!confirm("¿desactivar estudiante?")) return;
+        const id = Number(b.dataset.del);
+        const rr = await Api.estudiantes_delete({ id });
+        msg(rr.ok ? "estudiante desactivado" : (rr.error || "error"));
+        if (rr.ok) cargarEstudiantes();
+      };
+    });
+
+    $$("[data-edit]").forEach(b => {
+      if (b.disabled) return;
+      b.onclick = async () => {
+        if (!canEdit) return msg("sin permiso para editar");
+        const id = Number(b.dataset.edit);
+        const est = estudiantesData.find(x => Number(x.id) === id);
+        if (!est) return;
+        showEditEstudianteModal(est);
+      };
+    });
+
+    renderPager("#estPager", estPage, out.totalPages, (p) => {
+      estPage = p;
+      renderEstudiantesPage();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  }
+
+  function showEditEstudianteModal(est) {
+    const edadIni = calcEdad(est.fecha_nacimiento);
+
+    const modalHtml = `
+      <div class="modal-overlay" id="editEstModal" role="dialog" aria-modal="true">
+        <div class="modal-content">
+          <button class="modal-close" id="closeEstModal" type="button" aria-label="cerrar">&times;</button>
+          <div class="modal-header">
+            <h3>editar estudiante</h3>
+          </div>
+
+          <div class="form-grid">
+            <div class="form-group">
+              <label>nombres</label>
+              <input type="text" id="edit_est_nombres" class="form-control" value="${escapeHtml(est.nombres || "")}" />
+            </div>
+
+            <div class="form-group">
+              <label>apellidos</label>
+              <input type="text" id="edit_est_apellidos" class="form-control" value="${escapeHtml(est.apellidos || "")}" />
+            </div>
+
+            <div class="form-group">
+              <label>cédula</label>
+              <input type="text" id="edit_est_cedula" class="form-control" maxlength="10" value="${escapeHtml(est.cedula || "")}" />
+            </div>
+
+            <div class="form-group">
+              <label>fecha de nacimiento</label>
+              <input type="date" id="edit_est_fnac" class="form-control" value="${escapeHtml(est.fecha_nacimiento || "")}" />
+              <small class="hint" id="edit_est_edad">${edadIni === null ? "" : `edad: ${edadIni}`}</small>
+            </div>
+
+            <div class="form-group">
+              <label>correo</label>
+              <input type="email" id="edit_est_correo" class="form-control" value="${escapeHtml(est.correo || "")}" />
+            </div>
+
+            <div class="form-group">
+              <label>teléfono</label>
+              <input type="text" id="edit_est_telefono" class="form-control" value="${escapeHtml(est.telefono || "")}" />
+            </div>
+
+            <div class="form-group">
+              <label>estado</label>
+              <select id="edit_est_activo" class="form-control select">
+                <option value="1" ${Number(est.activo) === 1 ? "selected" : ""}>activo</option>
+                <option value="0" ${Number(est.activo) === 0 ? "selected" : ""}>inactivo</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="modal-actions">
+            <button class="btn btn-primary" id="saveEditEst" type="button">guardar</button>
+            <button class="btn btn-outline" id="cancelEditEst" type="button">cancelar</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.body.insertAdjacentHTML("beforeend", modalHtml);
+
+    const close = () => $("#editEstModal")?.remove();
+    $("#closeEstModal").onclick = close;
+    $("#cancelEditEst").onclick = close;
+
+    $("#edit_est_fnac").addEventListener("change", () => {
+      const e = calcEdad($("#edit_est_fnac").value);
+      $("#edit_est_edad").textContent = e === null ? "" : `edad: ${e}`;
+    });
+
+    $("#saveEditEst").onclick = async () => {
+      const nombres = $("#edit_est_nombres").value.trim();
+      const apellidos = $("#edit_est_apellidos").value.trim();
+      const cedula = onlyDigits($("#edit_est_cedula").value);
+      const fecha_nacimiento = $("#edit_est_fnac").value;
+      const correo = $("#edit_est_correo").value.trim();
+      const telefono = onlyDigits($("#edit_est_telefono").value);
+      const activo = Number($("#edit_est_activo").value);
+
+      if (!nombres || !apellidos || !cedula || !fecha_nacimiento) {
+        alert("complete los campos obligatorios");
+        return;
+      }
+      if (cedula.length !== 10) {
+        alert("la cédula debe tener 10 dígitos");
+        return;
+      }
+
+      const edad = calcEdad(fecha_nacimiento);
+      if (edad === null) {
+        alert("fecha de nacimiento inválida");
+        return;
+      }
+
+      const data = {
+        id: Number(est.id),
+        nombres,
+        apellidos,
+        cedula,
+        fecha_nacimiento,
+        correo,
+        telefono,
+        activo
+      };
+
+      const r = await Api.estudiantes_update(data);
+      if (r.ok) {
+        close();
+        cargarEstudiantes();
+        msg("estudiante actualizado");
+      } else {
+        alert("error: " + (r.error || "error"));
+      }
+    };
+
+    document.addEventListener("keydown", function escClose(e) {
+      if (e.key === "Escape") {
+        close();
+        document.removeEventListener("keydown", escClose);
+      }
+    });
+  }
+
+  async function cargarEstudiantes() {
+    if (!canList) return;
+
+    const r = await Api.estudiantes_list();
+    if (!r.ok) {
+      $("#estTableBody").innerHTML = `<tr><td colspan="10" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
+      return;
+    }
+
+    estudiantesData = Array.isArray(r.data) ? r.data : [];
+    if (estudiantesData.length === 0) {
+      $("#estTableBody").innerHTML = `<tr><td colspan="10" class="td-center">sin estudiantes</td></tr>`;
+      $("#estPager").innerHTML = "";
+      return;
+    }
+
+    estPage = 1;
+    renderEstudiantesPage();
+  }
+
+  cargarEstudiantes();
+}
+
+
+
+/* =========================
+   AUDITORÍA
+   ========================= */
+async function viewAuditoria(me) {
+  if (!(me?.is_admin || hasAnyPerm(me, "auditoria"))) {
+    location.hash = "#dashboard";
+    return router();
+  }
+
+  setView(shell(me, "auditoria", `
+    <div class="dashboard-container fade-in">
+      <div id="aMsg"></div>
+
+      <div class="form-container">
+        <h3>auditoría</h3>
+        <div class="form-grid">
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label>buscar</label>
+            <input id="aSearch" class="form-control" placeholder="usuario, acción, tabla, detalle..." />
+            <small class="hint">se filtra localmente (lo que devuelva el backend).</small>
+          </div>
+        </div>
+      </div>
+
+      <div class="table-container" style="margin-top:12px;">
+        <table class="data-table">
+          <thead id="aHead">
+            <tr>
+              <th>fecha</th>
+              <th>usuario</th>
+              <th>acción</th>
+              <th>tabla</th>
+              <th>detalle</th>
+            </tr>
+          </thead>
+          <tbody id="aBody">
+            <tr><td colspan="6" class="td-center">cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div id="aPager" class="pager-wrap"></div>
+    </div>
+  `));
+
+  bindTopbarDropdowns();
+  $("#btnLogout").onclick = logoutTotal;
+  startClock();
+
+  const setMsg = (t, okk=false) => {
+    const el = $("#aMsg");
+    if (el) el.innerHTML = msgBox(okk ? "success" : "info", t);
+  };
+
+  const PER_PAGE = 10;
+  let data = [];
+  let page = 1;
+
+  function norm(x){ return String(x ?? "").toLowerCase(); }
+
+  function filterRows() {
+    const q = norm($("#aSearch")?.value || "").trim();
+    if (!q) return data;
+    return data.filter(r => {
+      const blob = [
+        r.fecha, r.created_at, r.usuario, r.usuario_id, r.accion, r.tabla,
+        r.registro_id, r.ip, r.detalle, r.data, r.descripcion
+      ].map(norm).join(" ");
+      return blob.includes(q);
+    });
+  }
+
+  function pick(r, keys, fallback="") {
+    for (const k of keys) {
+      if (r && r[k] != null && r[k] !== "") return r[k];
+    }
+    return fallback;
+  }
+
+  function fmtDetail(v) {
+    if (v == null) return "";
+    if (typeof v === "object") {
+      try { return JSON.stringify(v); } catch { return String(v); }
+    }
+    return String(v);
+  }
+
+  function render() {
+    const rows = filterRows();
+    const out = paginate(rows, page, PER_PAGE);
+    page = out.page;
+
+    if (!out.slice.length) {
+      $("#aBody").innerHTML = `<tr><td colspan="6" class="td-center">sin registros</td></tr>`;
+      $("#aPager").innerHTML = "";
+      return;
+    }
+
+    $("#aBody").innerHTML = out.slice.map(r => {
+      const fecha = pick(r, ["fecha","created_at","fecha_hora","f"]);
+      const usuario = pick(r, ["usuario","usuario_nombre","user","username","actor"]);
+      const accion = pick(r, ["accion","acción","action","evento","event"]);
+      const tabla = pick(r, ["tabla","table","modulo","módulo"]);
+      const detalle = fmtDetail(pick(r, ["detalle","data","descripcion","descripción","cambios","payload"], ""));
+      return `
+        <tr>
+          <td>${escapeHtml(fecha)}</td>
+          <td>${escapeHtml(usuario)}</td>
+          <td><strong>${escapeHtml(accion)}</strong></td>
+          <td>${escapeHtml(tabla)}</td>
+          <td style="max-width:420px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(detalle)}">
+            ${escapeHtml(detalle)}
+          </td>
+        </tr>
+      `;
+    }).join("");
+
+    renderPager("#aPager", page, out.totalPages, (p) => {
+      page = p;
+      render();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  }
+
+  async function load() {
+    // Si tu backend no tiene este endpoint, verás el mensaje de error aquí.
+    if (!Api.auditoria_list) {
+      setMsg("no existe Api.auditoria_list en el frontend. agrega el endpoint en tu api.php.", false);
+      $("#aBody").innerHTML = `<tr><td colspan="6" class="td-center td-error">endpoint no disponible</td></tr>`;
+      return;
+    }
+
+    const r = await Api.auditoria_list();
+    if (!r.ok) {
+      setMsg(r.error || "error al cargar auditoría");
+      $("#aBody").innerHTML = `<tr><td colspan="6" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
+      return;
+    }
+
+    data = (r.rows || r.data || []);
+    if (!Array.isArray(data)) data = [];
+    page = 1;
+    render();
+  }
+
+  if ($("#aSearch")) {
+    $("#aSearch").addEventListener("input", () => { page = 1; render(); });
+  }
+
+  await load();
+}
+
+/* =========================
+   MI PERFIL (ESTUDIANTE)
+   ========================= */
+async function viewMiPerfil(me) {
+  if (me?.tipo !== "ESTUDIANTE") {
+    location.hash = "#dashboard";
+    return router();
+  }
+
+  setView(shell(me, "perfil", `
+    <div class="dashboard-container fade-in">
+      <div id="perfilMsg"></div>
+      
+      <div class="form-container" style="max-width:800px; margin:0 auto;">
+        <h3>mi perfil</h3>
+        
+        <div id="perfilForm">
+          <div class="td-center">cargando datos del perfil...</div>
+        </div>
+      </div>
+    </div>
+  `));
+
+  bindTopbarDropdowns();
+  $("#btnLogout").onclick = logoutTotal;
+  startClock();
+
+  const setMsg = (t, okk = false) => {
+    $("#perfilMsg").innerHTML = msgBox(okk ? "success" : "info", t);
+  };
+
+  async function cargarPerfil() {
+    const r = await Api.mi_perfil();
+    if (!r.ok) {
+      $("#perfilForm").innerHTML = `<div class="message info">${escapeHtml(r.error || "error al cargar perfil")}</div>`;
+      return;
+    }
+
+    const p = r.perfil;
+    
+    const html = `
+      <div class="form-grid">
+        <div class="form-group">
+          <label>nombres</label>
+          <input type="text" class="form-control" value="${escapeHtml(p.nombres || '')}" disabled readonly />
+        </div>
+
+        <div class="form-group">
+          <label>apellidos</label>
+          <input type="text" class="form-control" value="${escapeHtml(p.apellidos || '')}" disabled readonly />
+        </div>
+
+        <div class="form-group">
+          <label>cédula</label>
+          <input type="text" class="form-control" value="${escapeHtml(p.cedula || '')}" disabled readonly />
+        </div>
+
+        <div class="form-group">
+          <label>fecha de nacimiento</label>
+          <input type="date" id="perfil_fecha_nacimiento" class="form-control" value="${escapeHtml(p.fecha_nacimiento || '')}" />
+          <small class="hint" id="perfil_edad_hint"></small>
+        </div>
+
+        <div class="form-group">
+          <label>correo electrónico</label>
+          <input type="email" id="perfil_correo" class="form-control" value="${escapeHtml(p.correo || '')}" placeholder="tucorreo@ejemplo.com" />
+        </div>
+
+        <div class="form-group">
+          <label>teléfono</label>
+          <input type="text" id="perfil_telefono" class="form-control" value="${escapeHtml(p.telefono || '')}" placeholder="0999999999" maxlength="10" />
+        </div>
+
+        <div class="form-group" style="grid-column: 1 / -1; border-top:1px solid var(--border); margin-top:20px; padding-top:20px;">
+          <h4 style="margin-bottom:15px;">datos de acceso</h4>
+        </div>
+
+        <div class="form-group">
+          <label>usuario</label>
+          <input type="text" id="perfil_usuario" class="form-control" value="${escapeHtml(p.usuario || '')}" placeholder="usuario para iniciar sesión" />
+          <small class="hint">mínimo 4 caracteres (dejar vacío para no cambiar)</small>
+        </div>
+
+        <div class="form-group">
+          <label>nueva contraseña</label>
+          <input type="password" id="perfil_password" class="form-control" placeholder="dejar en blanco para no cambiar" />
+          <small class="hint">mínimo 8 caracteres</small>
+        </div>
+
+        <div class="form-group">
+          <label>confirmar contraseña</label>
+          <input type="password" id="perfil_password2" class="form-control" placeholder="repite tu nueva contraseña" />
+        </div>
+      </div>
+
+      <div class="modal-actions" style="justify-content:center; margin-top:30px;">
+        <button class="btn btn-primary" id="btnGuardarPerfil" type="button">guardar cambios</button>
+        <button class="btn btn-outline" id="btnCancelarPerfil" type="button">cancelar</button>
+      </div>
+    `;
+
+    $("#perfilForm").innerHTML = html;
+
+    $("#perfil_fecha_nacimiento").addEventListener("change", () => {
+      const edad = calcEdad($("#perfil_fecha_nacimiento").value);
+      const hint = $("#perfil_edad_hint");
+      if (hint) {
+        if (edad === null) {
+          hint.textContent = "fecha inválida";
+          hint.style.color = "var(--muted)";
+        } else if (edad < 18) {
+          hint.textContent = `debes ser mayor de edad (tienes ${edad} años)`;
+          hint.style.color = "var(--muted)";
+        } else {
+          hint.textContent = `edad: ${edad} años`;
+          hint.style.color = "var(--muted)";
+        }
+      }
+    });
+
+    setTimeout(() => {
+      const event = new Event('change');
+      $("#perfil_fecha_nacimiento")?.dispatchEvent(event);
+    }, 100);
+
+    $("#btnGuardarPerfil").onclick = async () => {
+      const fecha_nacimiento = $("#perfil_fecha_nacimiento").value;
+      const correo = $("#perfil_correo").value.trim();
+      const telefono = onlyDigits($("#perfil_telefono").value);
+      const usuario = $("#perfil_usuario").value.trim().toLowerCase();
+      const password = $("#perfil_password").value;
+      const password2 = $("#perfil_password2").value;
+
+      if (!fecha_nacimiento) {
+        setMsg("fecha de nacimiento es obligatoria");
+        return;
+      }
+
+      const edad = calcEdad(fecha_nacimiento);
+      if (edad === null) {
+        setMsg("fecha de nacimiento inválida");
+        return;
+      }
+      if (edad < 18) {
+        setMsg("debes ser mayor de edad (18+)");
+        return;
+      }
+
+      if (usuario && usuario.length < 4) {
+        setMsg("el usuario debe tener al menos 4 caracteres");
+        return;
+      }
+
+      if (password || password2) {
+        if (password.length < 8) {
+          setMsg("la contraseña debe tener al menos 8 caracteres");
+          return;
+        }
+        if (password !== password2) {
+          setMsg("las contraseñas no coinciden");
+          return;
+        }
+      }
+
+      const data = {
+        fecha_nacimiento,
+        correo,
+        telefono
+      };
+
+      if (usuario) data.usuario = usuario;
+      if (password) data.password = password;
+
+      const rr = await Api.mi_perfil_actualizar(data);
+      setMsg(rr.ok ? "perfil actualizado correctamente" : (rr.error || "error al actualizar"), rr.ok);
+
+      if (rr.ok) {
+        const meRes = await Api.me();
+        if (meRes.ok) {
+          document.querySelectorAll(".username").forEach(el => {
+            el.textContent = meRes.me.usuario;
+          });
+        }
+      }
+    };
+
+    $("#btnCancelarPerfil").onclick = () => {
+      location.hash = "#dashboard";
+    };
+  }
+
+  await cargarPerfil();
+}
 /* =========================
    logout + router
    ========================= */
@@ -1986,6 +2899,9 @@ async function router() {
   if (hash === "cursos" && !hasAnyPerm(me, "cursos")) location.hash = "#dashboard";
   if (hash === "matriculas" && !hasAnyPerm(me, "matriculas")) location.hash = "#dashboard";
   if (hash === "notas" && !hasAnyPerm(me, "notas")) location.hash = "#dashboard";
+  if (hash === "perfil" && me?.tipo !== "ESTUDIANTE") location.hash = "#dashboard";
+  if (hash === "auditoria" && !(me?.is_admin || hasAnyPerm(me, "auditoria"))) location.hash = "#dashboard";
+  
   if (hash === "reportes" && !(hasAnyPerm(me, "reportes") || hasAnyPerm(me, "horarios"))) location.hash = "#dashboard";
 
   const h = (location.hash || "#dashboard").replace("#", "");
@@ -1994,10 +2910,14 @@ async function router() {
   if (h === "usuarios") return viewUsuarios(me);
   if (h === "roles") return viewRoles(me);
   if (h === "permisos") return viewPermisos(me);
+  if (h === "estudiantes") return viewEstudiantes(me);
   if (h === "cursos") return viewCursos(me);
   if (h === "matriculas") return viewMatriculas(me);
   if (h === "notas") return viewNotas(me);
   if (h === "reportes") return viewReportes(me);
+  if (h === "perfil") return viewMiPerfil(me);
+  if (h === "auditoria") return viewAuditoria(me);
+  if (hash === "auditoria" && !(me?.is_admin || hasAnyPerm(me, "auditoria"))) location.hash = "#dashboard";
 
   location.hash = "#dashboard";
   return viewDashboard(me);

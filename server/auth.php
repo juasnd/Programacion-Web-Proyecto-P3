@@ -10,15 +10,8 @@ function json_out($data, $code = 200) {
 }
 
 function require_login() {
-    if (empty($_SESSION["usuario_id"])) {
+    if (empty($_SESSION["cuenta_id"]) || empty($_SESSION["tipo"])) {
         json_out(["ok" => false, "error" => "no autenticado"], 401);
-    }
-}
-
-function require_admin() {
-    require_login();
-    if (!is_admin()) {
-        json_out(["ok" => false, "error" => "acceso denegado"], 403);
     }
 }
 
@@ -90,24 +83,78 @@ function require_active_user() {
     global $enlace;
 
     require_login();
-    $uid = (int)$_SESSION["usuario_id"];
 
-    $stmt = mysqli_prepare($enlace, "SELECT activo FROM usuarios WHERE id = ? LIMIT 1");
-    if (!$stmt) json_out(["ok" => false, "error" => "error interno"], 500);
+    $tipo = (string)($_SESSION["tipo"] ?? "");
+    $cuenta_id = (int)($_SESSION["cuenta_id"] ?? 0);
+    if ($cuenta_id <= 0) json_out(["ok" => false, "error" => "no autenticado"], 401);
 
-    mysqli_stmt_bind_param($stmt, "i", $uid);
-    mysqli_stmt_execute($stmt);
-    $res = mysqli_stmt_get_result($stmt);
-    $row = mysqli_fetch_assoc($res);
-    mysqli_stmt_close($stmt);
-
-    if (!$row || (int)$row["activo"] !== 1) {
+    // validar cuenta activa
+    $st = mysqli_prepare($enlace, "SELECT activo FROM cuentas WHERE id=? LIMIT 1");
+    if (!$st) json_out(["ok" => false, "error" => "error interno"], 500);
+    mysqli_stmt_bind_param($st, "i", $cuenta_id);
+    mysqli_stmt_execute($st);
+    $res = mysqli_stmt_get_result($st);
+    $acc = $res ? mysqli_fetch_assoc($res) : null;
+    mysqli_stmt_close($st);
+    if (!$acc || (int)$acc["activo"] !== 1) {
         $_SESSION = [];
         if (ini_get("session.use_cookies")) {
             $p = session_get_cookie_params();
             setcookie(session_name(), "", time() - 42000, $p["path"], $p["domain"], $p["secure"], $p["httponly"]);
         }
         session_destroy();
-        json_out(["ok" => false, "error" => "usuario inactivo"], 401);
+        json_out(["ok" => false, "error" => "cuenta inactiva"], 401);
     }
+
+    if ($tipo === "SISTEMA") {
+        $uid = (int)($_SESSION["usuario_id"] ?? 0);
+        if ($uid <= 0) json_out(["ok" => false, "error" => "no autenticado"], 401);
+
+        $stmt = mysqli_prepare($enlace, "SELECT activo FROM usuarios WHERE id=? LIMIT 1");
+        if (!$stmt) json_out(["ok" => false, "error" => "error interno"], 500);
+
+        mysqli_stmt_bind_param($stmt, "i", $uid);
+        mysqli_stmt_execute($stmt);
+        $res = mysqli_stmt_get_result($stmt);
+        $row = $res ? mysqli_fetch_assoc($res) : null;
+        mysqli_stmt_close($stmt);
+
+        if (!$row || (int)$row["activo"] !== 1) {
+            $_SESSION = [];
+            if (ini_get("session.use_cookies")) {
+                $p = session_get_cookie_params();
+                setcookie(session_name(), "", time() - 42000, $p["path"], $p["domain"], $p["secure"], $p["httponly"]);
+            }
+            session_destroy();
+            json_out(["ok" => false, "error" => "usuario inactivo"], 401);
+        }
+        return;
+    }
+
+    if ($tipo === "ESTUDIANTE") {
+        $eid = (int)($_SESSION["estudiante_id"] ?? 0);
+        if ($eid <= 0) json_out(["ok" => false, "error" => "no autenticado"], 401);
+
+        $stmt = mysqli_prepare($enlace, "SELECT activo FROM estudiantes WHERE id=? LIMIT 1");
+        if (!$stmt) json_out(["ok" => false, "error" => "error interno"], 500);
+
+        mysqli_stmt_bind_param($stmt, "i", $eid);
+        mysqli_stmt_execute($stmt);
+        $res = mysqli_stmt_get_result($stmt);
+        $row = $res ? mysqli_fetch_assoc($res) : null;
+        mysqli_stmt_close($stmt);
+
+        if (!$row || (int)$row["activo"] !== 1) {
+            $_SESSION = [];
+            if (ini_get("session.use_cookies")) {
+                $p = session_get_cookie_params();
+                setcookie(session_name(), "", time() - 42000, $p["path"], $p["domain"], $p["secure"], $p["httponly"]);
+            }
+            session_destroy();
+            json_out(["ok" => false, "error" => "estudiante inactivo"], 401);
+        }
+        return;
+    }
+
+    json_out(["ok" => false, "error" => "tipo inválido"], 401);
 }

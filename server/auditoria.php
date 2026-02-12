@@ -11,7 +11,10 @@ function auditoria($accion, $tabla = null, $registro_id = null, $descripcion = "
 
     $fecha = date("Y-m-d H:i:s");
     $usuario = $_SESSION["usuario"] ?? null;
-    $usuario_id = $_SESSION["usuario_id"] ?? null;
+    $usuario_id = ($_SESSION["tipo"] ?? "") === "ESTUDIANTE"
+        ? ($_SESSION["estudiante_id"] ?? null)
+        : ($_SESSION["usuario_id"] ?? null);
+
     $ip = get_ip();
 
     $stmt = mysqli_prepare($enlace, "
