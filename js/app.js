@@ -1,4 +1,4 @@
-/* /js/app.js (corregido: topbar con desplegables Roles/Reportes) */
+
 function $(sel) { return document.querySelector(sel); }
 function $$(sel) { return document.querySelectorAll(sel); }
 
@@ -193,7 +193,7 @@ function bindCedulaPicker(inputEl, users, onPick) {
 }
 
 /* =========================
-   shell (layout) + dropdown topbar
+   shell
    ========================= */
 function shell(me, active, contentHtml) {
   const showUsuarios   = hasAnyPerm(me, "usuarios");
@@ -288,7 +288,6 @@ function shell(me, active, contentHtml) {
 }
 
 function bindTopbarDropdowns() {
-  // evita duplicar listeners por re-render
   if (window.__topbar_dd_bound) return;
   window.__topbar_dd_bound = true;
 
@@ -349,7 +348,6 @@ function loginView(msg = "") {
 
 
 // ====== bloqueo por intentos fallidos (cliente) ======
-// Nota: el bloqueo real debe aplicarse también en backend; aquí solo evitamos spam del login.
 const LOGIN_MAX_FAILS = 3;
 const LOGIN_LOCK_MINUTES = 10;
 const loginKey = (u) => `login_fail_${String(u || "").toLowerCase()}`;
@@ -472,7 +470,7 @@ async function viewDashboard(me) {
 }
 
 /* =========================
-   usuarios (sin cambios grandes aquí)
+   usuarios 
    ========================= */
 function showEditUserModal(me, user, roles, onSave) {
   const edadIni = calcEdad(user.fecha_nacimiento);
@@ -607,8 +605,9 @@ function showEditUserModal(me, user, roles, onSave) {
 }
 
 /* =========================
-   usuarios - SOLO FILTROS (sin búsqueda)
+   usuarios 
    ========================= */
+
 async function viewUsuarios(me) {
   if (!hasAnyPerm(me, "usuarios")) { location.hash = "#dashboard"; return router(); }
 
@@ -668,7 +667,7 @@ async function viewUsuarios(me) {
       ` : `<div class="message info">no tienes permiso para crear usuarios</div>`}
 
       ${canList ? `
-      <!-- ===== FILTROS ===== -->
+      <!-- ===== FILTRO SOLO ACTIVO/INACTIVO ===== -->
       <div class="form-container" style="margin-bottom:15px; padding:15px;">
         <div style="display:flex; gap:15px; align-items:flex-end; flex-wrap:wrap;">
           <div style="min-width:200px;">
@@ -717,7 +716,6 @@ async function viewUsuarios(me) {
 
   function msg(text) { $("#uMsg").innerHTML = msgBox("info", text); setTimeout(() => ($("#uMsg").innerHTML = ""), 3500); }
 
-  // ===== CREAR USUARIO =====
   if (canCreate) {
     $("#u_fnac").addEventListener("change", () => {
       const e = calcEdad($("#u_fnac").value);
@@ -759,26 +757,33 @@ async function viewUsuarios(me) {
     };
   }
 
-  // ===== FILTROS Y PAGINACIÓN =====
   if (canList) {
-    let usersData = [];
+    let allUsers = [];
     let filteredUsers = [];
     let uPage = 1;
-    const perPage = 6;
+    const perPage = 4;
     let estadoFilter = "";
 
     async function cargarUsuarios() {
-      const params = new URLSearchParams();
-      if (estadoFilter !== "") params.append("estado", estadoFilter);
-
-      const r = await Api.usuarios_list(params.toString() ? `?${params.toString()}` : null);
+      const r = await Api.usuarios_list();
       if (!r.ok) {
         $("#uTableBody").innerHTML = `<tr><td colspan="9" class="td-center td-error">${escapeHtml(r.error || "error")}</td></tr>`;
         return;
       }
+      allUsers = Array.isArray(r.data) ? r.data : [];
+      aplicarFiltro();
+    }
 
-      usersData = Array.isArray(r.data) ? r.data : [];
-      filteredUsers = usersData;
+    function aplicarFiltro() {
+      // SOLO FILTRO POR ESTADO (activo/inactivo)
+      if (estadoFilter === "1") {
+        filteredUsers = allUsers.filter(u => Number(u.activo) === 1);
+      } else if (estadoFilter === "0") {
+        filteredUsers = allUsers.filter(u => Number(u.activo) === 0);
+      } else {
+        filteredUsers = [...allUsers]; // todos
+      }
+      
       uPage = 1;
       renderUsersPage();
     }
@@ -833,7 +838,7 @@ async function viewUsuarios(me) {
         b.onclick = async () => {
           if (!canEdit) return msg("sin permiso para editar");
           const id = Number(b.dataset.edit);
-          const user = usersData.find(x => Number(x.id) === id);
+          const user = allUsers.find(x => Number(x.id) === id);
           if (!user) return;
           showEditUserModal(me, user, roles, async () => { USERS_CACHE.loaded = false; await cargarUsuarios(); });
         };
@@ -846,11 +851,11 @@ async function viewUsuarios(me) {
       });
     }
 
-    // ✅ BOTONES DE FILTRO - AHORA SÍ FUNCIONAN
+    // BOTONES DE FILTRO
     if ($("#btnFiltrarUsuarios")) {
       $("#btnFiltrarUsuarios").onclick = () => {
         estadoFilter = $("#uEstadoFilter")?.value || "";
-        cargarUsuarios();
+        aplicarFiltro();
       };
     }
 
@@ -858,7 +863,7 @@ async function viewUsuarios(me) {
       $("#btnLimpiarFiltros").onclick = () => {
         if ($("#uEstadoFilter")) $("#uEstadoFilter").value = "";
         estadoFilter = "";
-        cargarUsuarios();
+        aplicarFiltro();
       };
     }
 
@@ -1024,7 +1029,6 @@ async function viewRoles(me) {
   cargarRoles();
 }
 
-/* ===================== PERMISOS ===================== */
 async function viewPermisos(me) {
   if (!hasAnyPerm(me, "permisos")) { location.hash = "#dashboard"; return router(); }
 
@@ -1165,13 +1169,11 @@ async function viewPermisos(me) {
 }
 
 /* =========================
-   cursos (MEJORADO: asignar docente por select + cédula)
+   cursos 
    ========================= */
-/* =========================
-   cursos - CON PAGINACIÓN
-   ========================= */
+
 async function viewCursos(me) {
-  if (!hasAnyPerm(me, "cursos")) { location.hash="#dashboard"; return router(); }
+  if (!hasAnyPerm(me, "cursos")) { location.hash = "#dashboard"; return router(); }
 
   const canCreate = hasPerm(me, "cursos", "crear");
   const canEdit = hasPerm(me, "cursos", "editar");
@@ -1183,7 +1185,7 @@ async function viewCursos(me) {
 
       ${canCreate ? `
       <div class="form-container">
-        <h3>crear curso (online)</h3>
+        <h3>crear curso</h3>
         <div class="form-grid">
           <div class="form-group" style="grid-column: 1 / -1;">
             <label>nombre</label>
@@ -1202,8 +1204,11 @@ async function viewCursos(me) {
             <input id="c_costo" class="form-control" type="number" step="0.01" min="0" value="0" />
           </div>
           <div class="form-group">
-            <label>docente (opcional)</label>
-            <select id="c_docente_sel" class="form-control select"></select>
+            <label>docente</label>
+            <select id="c_docente_sel" class="form-control select">
+              <option value="">sin docente</option>
+            </select>
+            <small class="hint">solo se muestran usuarios con rol docente</small>
           </div>
           <div class="form-group">
             <label>día</label>
@@ -1215,11 +1220,11 @@ async function viewCursos(me) {
           </div>
           <div class="form-group">
             <label>hora inicio</label>
-            <input id="c_hi" class="form-control" value="07:00" />
+            <input id="c_hi" class="form-control" placeholder="07:00" value="" />
           </div>
           <div class="form-group">
             <label>hora fin</label>
-            <input id="c_hf" class="form-control" value="08:00" />
+            <input id="c_hf" class="form-control" placeholder="08:00" value="" />
           </div>
         </div>
         <div class="modal-actions" style="justify-content:flex-start; gap:10px;">
@@ -1255,19 +1260,47 @@ async function viewCursos(me) {
   $("#btnLogout").onclick = logoutTotal;
   startClock();
 
-  const setMsg = (t, okk=false) => { $("#cMsg").innerHTML = msgBox(okk ? "success" : "info", t); };
+  const setMsg = (t, okk = false) => { $("#cMsg").innerHTML = msgBox(okk ? "success" : "info", t); };
 
-  // cargar docentes
-  let docentes = [];
-  async function loadDocentes(force=false) {
-    const all = await ensureUsersCache(force);
-    if (!all) { setMsg("no se pudo cargar usuarios para docentes"); return; }
-    docentes = all.filter(u => roleKind(u) === "docente" && Number(u.activo) === 1);
-    if (docentes.length === 0) docentes = all.filter(u => Number(u.activo) === 1);
-    if ($("#c_docente_sel")) fillUserSelect($("#c_docente_sel"), docentes, "sin docente");
+  function esDocente(u) {
+    if (!u || !u.rol_nombre) return false;
+    const rol = String(u.rol_nombre).toLowerCase().trim();
+    return rol === "docente" || 
+           rol.includes("docente") || 
+           rol === "profesor" || 
+           rol.includes("prof");
   }
 
-  // PAGINACIÓN
+  // ===== CARGAR SOLO DOCENTES =====
+  let docentes = [];
+  async function loadDocentes(force = false) {
+    const all = await ensureUsersCache(force);
+    if (!all) { 
+      setMsg("no se pudo cargar usuarios para docentes"); 
+      return; 
+    }
+
+    docentes = all.filter(u => {
+      const activo = Number(u.activo) === 1;
+      return activo && esDocente(u);
+    });
+
+    const sel = $("#c_docente_sel");
+    if (sel) {
+      sel.innerHTML = '<option value="">sin docente</option>';
+      docentes.forEach(u => {
+        const option = document.createElement("option");
+        option.value = u.id;
+        option.textContent = `${u.apellidos || ""} ${u.nombres || ""}`.trim() || u.usuario;
+        sel.appendChild(option);
+      });
+    }
+
+    if (docentes.length === 0) {
+      setMsg("no hay docentes activos disponibles");
+    }
+  }
+
   let allCursos = [];
   let currentPage = 1;
   const perPage = 4;
@@ -1289,7 +1322,7 @@ async function viewCursos(me) {
 
     $("#cTableBody").innerHTML = out.slice.length ? out.slice.map(x => {
       const docente = x.docente_nombre ? escapeHtml(x.docente_nombre) : (x.docente_id ? `#${escapeHtml(x.docente_id)}` : "-");
-      const horario = `${escapeHtml(diaNombre(x.dia_semana))} ${escapeHtml(x.hora_inicio)}-${escapeHtml(x.hora_fin)}`;
+      const horario = `${escapeHtml(diaNombre(x.dia_semana))} ${escapeHtml(x.hora_inicio || "00:00")}-${escapeHtml(x.hora_fin || "00:00")}`;
       const acciones = `
         ${canEdit ? `<button class="btn btn-outline btn-sm" data-edit="${x.id}" type="button">editar</button>` : ""}
         ${canDelete ? `<button class="btn btn-outline btn-sm" data-del="${x.id}" type="button">desactivar</button>` : ""}
@@ -1310,7 +1343,6 @@ async function viewCursos(me) {
       `;
     }).join("") : `<tr><td colspan="7" class="td-center">sin cursos</td></tr>`;
 
-    // Eventos
     $$("#cTableBody [data-del]").forEach(b => {
       b.onclick = async () => {
         const id = Number(b.dataset.del);
@@ -1328,13 +1360,13 @@ async function viewCursos(me) {
         if (!row) return;
 
         const nombre = prompt("nombre:", row.nombre); if (nombre === null) return;
-        const descripcion = prompt("descripción:", row.descripcion ?? ""); if (descripcion === null) return;
-        const duracion_semanas = prompt("duración (semanas):", row.duracion_semanas ?? 4); if (duracion_semanas === null) return;
-        const costo = prompt("costo:", row.costo ?? 0); if (costo === null) return;
-        const docente_id = prompt("docente_id (vacío = sin docente):", row.docente_id ?? ""); if (docente_id === null) return;
+        const descripcion = prompt("descripción:", row.descripcion || ""); if (descripcion === null) return;
+        const duracion_semanas = prompt("duración (semanas):", row.duracion_semanas || 4); if (duracion_semanas === null) return;
+        const costo = prompt("costo:", row.costo || 0); if (costo === null) return;
+        const docente_id = prompt("docente_id (vacío = sin docente):", row.docente_id || ""); if (docente_id === null) return;
         const dia_semana = prompt("día (1=lun..7=dom):", row.dia_semana); if (dia_semana === null) return;
-        const hora_inicio = prompt("hora inicio (HH:MM):", row.hora_inicio); if (hora_inicio === null) return;
-        const hora_fin = prompt("hora fin (HH:MM):", row.hora_fin); if (hora_fin === null) return;
+        const hora_inicio = prompt("hora inicio (HH:MM):", row.hora_inicio || "07:00"); if (hora_inicio === null) return;
+        const hora_fin = prompt("hora fin (HH:MM):", row.hora_fin || "08:00"); if (hora_fin === null) return;
 
         const rr = await Api.cursos_update({
           id,
@@ -1384,8 +1416,19 @@ async function viewCursos(me) {
 
       if (!nombre) { setMsg("complete el nombre"); return; }
       if (!duracion_semanas || duracion_semanas < 1) { setMsg("duración inválida"); return; }
+      if (!hora_inicio) { setMsg("complete hora inicio"); return; }
+      if (!hora_fin) { setMsg("complete hora fin"); return; }
 
-      const payload = { nombre, descripcion, duracion_semanas, costo, dia_semana, hora_inicio, hora_fin };
+      const payload = { 
+        nombre, 
+        descripcion, 
+        duracion_semanas, 
+        costo, 
+        dia_semana, 
+        hora_inicio, 
+        hora_fin
+      };
+      
       if (docenteSel !== "") payload.docente_id = Number(docenteSel);
 
       const rr = await Api.cursos_create(payload);
@@ -1396,13 +1439,14 @@ async function viewCursos(me) {
         $("#c_desc").value = "";
         $("#c_dur").value = "4";
         $("#c_costo").value = "0";
+        $("#c_hi").value = "";
+        $("#c_hf").value = "";
         if ($("#c_docente_sel")) $("#c_docente_sel").value = "";
         await loadCursos();
       }
     };
   }
 }
-
 
 async function viewMatriculas(me) {
   if (!hasAnyPerm(me, "matriculas")) { location.hash="#dashboard"; return router(); }
@@ -1453,7 +1497,6 @@ async function viewMatriculas(me) {
 
   const setMsg = (t, okk=false) => { $("#mMsg").innerHTML = msgBox(okk ? "success" : "info", t); };
 
-  // cursos
   const r = await Api.cursos_list();
   const cursos = (r.ok ? (r.rows || r.data || []) : []);
   const selCurso = $("#m_curso");
@@ -1834,11 +1877,14 @@ async function viewReportes(me) {
           ${esEstudiante ? `
             <button class="btn btn-primary" id="btnMisNotas">mis notas</button>
             <button class="btn btn-outline" id="btnMiHorario">mi horario</button>
+            <button class="btn btn-success" id="btnPdfMisNotas">📄 PDF notas</button>
+            <button class="btn btn-success" id="btnPdfMiHorario">📄 PDF horario</button>
           ` : ''}
 
           ${esDocente || esAdmin ? `
             <button class="btn btn-primary" id="btnHorarioDoc">mi horario</button>
             <button class="btn btn-outline" id="btnMisCursos">mis cursos</button>
+            <button class="btn btn-success" id="btnPdfHorarioDoc">📄 PDF horario</button>
           ` : ''}
         </div>
 
@@ -1872,13 +1918,50 @@ async function viewReportes(me) {
     $("#repBody").innerHTML = bodyHtml;
   }
 
-  // ============================================
-  // REPORTE 1: NOTAS DEL ESTUDIANTE
-  // ============================================
+  function generarPDF(titulo, headHtml, bodyRows) {
+    if (!window.jspdf || !window.jspdf.jsPDF) {
+      setMsg("biblioteca PDF no cargada", false);
+      return;
+    }
+
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: 'landscape' });
+    
+    let y = 20;
+    doc.setFontSize(16);
+    doc.text(titulo, 14, y);
+    
+    y += 10;
+    doc.setFontSize(10);
+    doc.text(`Generado: ${new Date().toLocaleString('es-EC')}`, 14, y);
+    doc.text(`Usuario: ${me?.usuario || ''}`, 14, y + 5);
+    doc.text(`Rol: ${me?.rol_nombre || 'sin rol'}`, 14, y + 10);
+    
+    y += 20;
+    
+    const headers = headHtml.match(/<th>(.*?)<\/th>/g)?.map(h => h.replace(/<\/?th>/g, '')) || [];
+    const data = bodyRows.map(row => {
+      const cells = row.match(/<td>(.*?)<\/td>/g)?.map(c => c.replace(/<\/?td>/g, '').replace(/<[^>]*>/g, '')) || [];
+      return cells;
+    });
+    
+    doc.autoTable({
+      head: [headers],
+      body: data,
+      startY: y,
+      styles: { fontSize: 8, cellPadding: 2 },
+      headStyles: { fillColor: [41, 128, 185], textColor: 255 },
+      alternateRowStyles: { fillColor: [245, 245, 245] }
+    });
+    
+    doc.save(`${titulo.replace(/ /g, '_')}_${new Date().toISOString().slice(0,10)}.pdf`);
+    setMsg("PDF generado correctamente", true);
+  }
+
+
   if ($("#btnMisNotas")) {
     $("#btnMisNotas").onclick = async () => {
       if (!hasPerm(me, "reportes", "ver")) return;
-
       $("#cursoSelectorContainer").style.display = "none";
 
       const r = await Api.reporte_notas_estudiante();
@@ -1913,14 +1996,11 @@ async function viewReportes(me) {
           estado === "APROBADO" ? "status-active" :
           estado === "SUPLETORIO" ? "status-warning" :
           "status-inactive";
-
         const horario = `${diaNombre(x.dia_semana)} ${x.hora_inicio || "00:00"}-${x.hora_fin || "00:00"}`;
-
         const p1 = Number(x.p1_total ?? 0).toFixed(2);
         const p2 = Number(x.p2_total ?? 0).toFixed(2);
         const p3 = Number(x.p3_total ?? 0).toFixed(2);
         const nf = Number(x.nota_final ?? 0).toFixed(2);
-
         return `
           <tr>
             <td><strong>${escapeHtml(x.nombre)}</strong></td>
@@ -1931,25 +2011,41 @@ async function viewReportes(me) {
             <td>${escapeHtml(p3)}</td>
             <td><strong>${escapeHtml(nf)}</strong></td>
             <td><span class="status-badge ${estadoClass}">${escapeHtml(estado || "REPROBADO")}</span></td>
-            <td>${x.supletorio_nota != null && x.supletorio_nota !== ""
-              ? escapeHtml(Number(x.supletorio_nota).toFixed(2))
-              : '<span class="hint">—</span>'}
-            </td>
+            <td>${x.supletorio_nota ? escapeHtml(Number(x.supletorio_nota).toFixed(2)) : '<span class="hint">—</span>'}</td>
           </tr>
         `;
       }).join("");
 
       setTable(headHtml, bodyHtml);
+      window.__reporteNotasRows = rows;
+      window.__reporteNotasHead = headHtml;
+      window.__reporteNotasBody = bodyHtml;
     };
+
+
+    if ($("#btnPdfMisNotas")) {
+      $("#btnPdfMisNotas").onclick = async () => {
+        if (!window.__reporteNotasRows) {
+          const r = await Api.reporte_notas_estudiante();
+          if (!r.ok) { setMsg(r.error || "error"); return; }
+          window.__reporteNotasRows = r.rows || r.data || [];
+          const rows = window.__reporteNotasRows;
+          if (!rows.length) { setMsg("no hay datos para PDF"); return; }
+          window.__reporteNotasHead = `<tr><th>curso</th><th>docente</th><th>horario</th><th>p1</th><th>p2</th><th>p3</th><th>final</th><th>estado</th><th>supletorio</th></tr>`;
+          window.__reporteNotasBody = rows.map(x => {
+            const horario = `${diaNombre(x.dia_semana)} ${x.hora_inicio || "00:00"}-${x.hora_fin || "00:00"}`;
+            return `<tr><td>${x.nombre}</td><td>${x.docente_nombre || "-"}</td><td>${horario}</td><td>${Number(x.p1_total||0).toFixed(2)}</td><td>${Number(x.p2_total||0).toFixed(2)}</td><td>${Number(x.p3_total||0).toFixed(2)}</td><td>${Number(x.nota_final||0).toFixed(2)}</td><td>${x.estado||"REPROBADO"}</td><td>${x.supletorio_nota ? Number(x.supletorio_nota).toFixed(2) : '-'}</td></tr>`;
+          }).join("");
+        }
+        if (!window.__reporteNotasRows.length) { setMsg("no hay datos para PDF"); return; }
+        generarPDF("Reporte de Notas", window.__reporteNotasHead, window.__reporteNotasBody.match(/<tr>.*?<\/tr>/g) || []);
+      };
+    }
   }
 
-  // ============================================
-  // REPORTE 2: HORARIO DEL ESTUDIANTE
-  // ============================================
   if ($("#btnMiHorario")) {
     $("#btnMiHorario").onclick = async () => {
       if (!hasPerm(me, "horarios", "ver") && !hasPerm(me, "reportes", "ver")) return;
-
       $("#cursoSelectorContainer").style.display = "none";
 
       const r = await Api.matriculas_list_mi();
@@ -1983,16 +2079,33 @@ async function viewReportes(me) {
       `).join("");
 
       setTable(headHtml, bodyHtml);
+      window.__reporteHorarioRows = rows;
+      window.__reporteHorarioHead = headHtml;
+      window.__reporteHorarioBody = bodyHtml;
     };
+
+    if ($("#btnPdfMiHorario")) {
+      $("#btnPdfMiHorario").onclick = async () => {
+        if (!window.__reporteHorarioRows) {
+          const r = await Api.matriculas_list_mi();
+          if (!r.ok) { setMsg(r.error || "error"); return; }
+          window.__reporteHorarioRows = r.rows || r.data || [];
+          const rows = window.__reporteHorarioRows;
+          if (!rows.length) { setMsg("no hay datos para PDF"); return; }
+          window.__reporteHorarioHead = `<tr><th>curso</th><th>día</th><th>hora</th><th>docente</th></tr>`;
+          window.__reporteHorarioBody = rows.map(x => 
+            `<tr><td>${x.nombre}</td><td>${diaNombre(x.dia_semana)}</td><td>${x.hora_inicio}-${x.hora_fin}</td><td>${x.docente_nombre||"-"}</td></tr>`
+          ).join("");
+        }
+        if (!window.__reporteHorarioRows.length) { setMsg("no hay datos para PDF"); return; }
+        generarPDF("Mi Horario", window.__reporteHorarioHead, window.__reporteHorarioBody.match(/<tr>.*?<\/tr>/g) || []);
+      };
+    }
   }
 
-  // ============================================
-  // REPORTE 3: HORARIO DEL DOCENTE
-  // ============================================
   if ($("#btnHorarioDoc")) {
     $("#btnHorarioDoc").onclick = async () => {
       if (!hasPerm(me, "horarios", "ver") && !hasPerm(me, "reportes", "ver")) return;
-
       $("#cursoSelectorContainer").style.display = "none";
 
       const r = await Api.reporte_horario_docente();
@@ -2024,12 +2137,30 @@ async function viewReportes(me) {
       `).join("");
 
       setTable(headHtml, bodyHtml);
+      window.__reporteHorarioDocRows = rows;
+      window.__reporteHorarioDocHead = headHtml;
+      window.__reporteHorarioDocBody = bodyHtml;
     };
+
+    if ($("#btnPdfHorarioDoc")) {
+      $("#btnPdfHorarioDoc").onclick = async () => {
+        if (!window.__reporteHorarioDocRows) {
+          const r = await Api.reporte_horario_docente();
+          if (!r.ok) { setMsg(r.error || "error"); return; }
+          window.__reporteHorarioDocRows = r.rows || r.data || [];
+          const rows = window.__reporteHorarioDocRows;
+          if (!rows.length) { setMsg("no hay datos para PDF"); return; }
+          window.__reporteHorarioDocHead = `<tr><th>curso</th><th>día</th><th>hora</th></tr>`;
+          window.__reporteHorarioDocBody = rows.map(x => 
+            `<tr><td>${x.nombre}</td><td>${diaNombre(x.dia_semana)}</td><td>${x.hora_inicio}-${x.hora_fin}</td></tr>`
+          ).join("");
+        }
+        if (!window.__reporteHorarioDocRows.length) { setMsg("no hay datos para PDF"); return; }
+        generarPDF("Mi Horario Docente", window.__reporteHorarioDocHead, window.__reporteHorarioDocBody.match(/<tr>.*?<\/tr>/g) || []);
+      };
+    }
   }
 
-  // ============================================
-  // REPORTE 4: CURSOS DEL DOCENTE + SELECT PARA VER NOTAS
-  // ============================================
   if ($("#btnMisCursos")) {
     $("#btnMisCursos").onclick = async () => {
       if (!hasPerm(me, "reportes", "ver")) return;
@@ -2047,7 +2178,6 @@ async function viewReportes(me) {
         return;
       }
 
-      // select de cursos
       const selectContainer = $("#cursoSelectorContainer");
       selectContainer.style.display = "block";
 
@@ -2060,7 +2190,6 @@ async function viewReportes(me) {
       `;
       selectContainer.innerHTML = selectHtml;
 
-      // tabla “mis cursos”
       const headHtml = `
         <tr>
           <th>curso</th>
@@ -2090,9 +2219,6 @@ async function viewReportes(me) {
     };
   }
 
-  // ============================================
-  // FUNCIÓN: VER NOTAS DE UN CURSO (DOCENTE)
-  // ============================================
   async function verNotasCurso(curso_id) {
     const r = await Api.reporte_notas_curso_docente(curso_id);
     if (!r.ok) { setMsg(r.error || "error"); return; }
@@ -2144,10 +2270,7 @@ async function viewReportes(me) {
           <td>${escapeHtml(p3)}</td>
           <td><strong>${escapeHtml(nf)}</strong></td>
           <td><span class="status-badge ${estadoClass}">${escapeHtml(estado || "REPROBADO")}</span></td>
-          <td>${x.supletorio_nota != null && x.supletorio_nota !== ""
-            ? escapeHtml(Number(x.supletorio_nota).toFixed(2))
-            : '<span class="hint">—</span>'}
-          </td>
+          <td>${x.supletorio_nota ? escapeHtml(Number(x.supletorio_nota).toFixed(2)) : '<span class="hint">—</span>'}</td>
         </tr>
       `;
     }).join("");
@@ -2543,11 +2666,13 @@ async function viewAuditoria(me) {
 
       <div class="form-container">
         <h3>auditoría</h3>
-        <div class="form-grid">
-          <div class="form-group" style="grid-column: 1 / -1;">
+        <div style="display:flex; gap:15px; align-items:flex-end; flex-wrap:wrap; margin-bottom:15px;">
+          <div style="flex:2; min-width:250px;">
             <label>buscar</label>
             <input id="aSearch" class="form-control" placeholder="usuario, acción, tabla, detalle..." />
-            <small class="hint">se filtra localmente (lo que devuelva el backend).</small>
+          </div>
+          <div style="display:flex; gap:10px;">
+            <button class="btn btn-success" id="btnPdfAuditoria">📄 PDF auditoría</button>
           </div>
         </div>
       </div>
@@ -2558,6 +2683,7 @@ async function viewAuditoria(me) {
             <tr>
               <th>fecha</th>
               <th>usuario</th>
+              <th>ip</th>
               <th>acción</th>
               <th>tabla</th>
               <th>detalle</th>
@@ -2577,47 +2703,76 @@ async function viewAuditoria(me) {
   $("#btnLogout").onclick = logoutTotal;
   startClock();
 
-  const setMsg = (t, okk=false) => {
+  const setMsg = (t, okk = false) => {
     const el = $("#aMsg");
     if (el) el.innerHTML = msgBox(okk ? "success" : "info", t);
   };
 
   const PER_PAGE = 10;
-  let data = [];
+  let allLogs = [];
+  let filteredLogs = [];
   let page = 1;
 
-  function norm(x){ return String(x ?? "").toLowerCase(); }
+  function generarPDFAuditoria() {
+    if (!window.jspdf || !window.jspdf.jsPDF) {
+      setMsg("biblioteca PDF no cargada", false);
+      return;
+    }
+
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: 'landscape' });
+    
+    let y = 20;
+    doc.setFontSize(16);
+    doc.text("Reporte de Auditoría", 14, y);
+    
+    y += 10;
+    doc.setFontSize(10);
+    doc.text(`Generado: ${new Date().toLocaleString('es-EC')}`, 14, y);
+    doc.text(`Usuario: ${me?.usuario || ''}`, 14, y + 5);
+    doc.text(`Rol: ${me?.rol_nombre || 'sin rol'}`, 14, y + 10);
+    
+    y += 20;
+    
+    const headers = ["fecha", "usuario", "ip", "acción", "tabla", "detalle"];
+    const data = filteredLogs.map(log => [
+      log.fecha || '',
+      log.usuario || '-',
+      log.ip || '-',
+      log.accion || '',
+      log.tabla || '-',
+      (log.detalle || log.descripcion || '').substring(0, 100)
+    ]);
+    
+    doc.autoTable({
+      head: [headers],
+      body: data,
+      startY: y,
+      styles: { fontSize: 7, cellPadding: 2 },
+      headStyles: { fillColor: [41, 128, 185], textColor: 255 },
+      alternateRowStyles: { fillColor: [245, 245, 245] }
+    });
+    
+    doc.save(`auditoria_${new Date().toISOString().slice(0,10)}.pdf`);
+    setMsg("PDF generado correctamente", true);
+  }
+
+  function norm(x) { return String(x ?? "").toLowerCase(); }
 
   function filterRows() {
     const q = norm($("#aSearch")?.value || "").trim();
-    if (!q) return data;
-    return data.filter(r => {
+    if (!q) return allLogs;
+    return allLogs.filter(r => {
       const blob = [
-        r.fecha, r.created_at, r.usuario, r.usuario_id, r.accion, r.tabla,
-        r.registro_id, r.ip, r.detalle, r.data, r.descripcion
+        r.fecha, r.usuario, r.ip, r.accion, r.tabla, r.detalle, r.descripcion
       ].map(norm).join(" ");
       return blob.includes(q);
     });
   }
 
-  function pick(r, keys, fallback="") {
-    for (const k of keys) {
-      if (r && r[k] != null && r[k] !== "") return r[k];
-    }
-    return fallback;
-  }
-
-  function fmtDetail(v) {
-    if (v == null) return "";
-    if (typeof v === "object") {
-      try { return JSON.stringify(v); } catch { return String(v); }
-    }
-    return String(v);
-  }
-
   function render() {
-    const rows = filterRows();
-    const out = paginate(rows, page, PER_PAGE);
+    filteredLogs = filterRows();
+    const out = paginate(filteredLogs, page, PER_PAGE);
     page = out.page;
 
     if (!out.slice.length) {
@@ -2627,19 +2782,26 @@ async function viewAuditoria(me) {
     }
 
     $("#aBody").innerHTML = out.slice.map(r => {
-      const fecha = pick(r, ["fecha","created_at","fecha_hora","f"]);
-      const usuario = pick(r, ["usuario","usuario_nombre","user","username","actor"]);
-      const accion = pick(r, ["accion","acción","action","evento","event"]);
-      const tabla = pick(r, ["tabla","table","modulo","módulo"]);
-      const detalle = fmtDetail(pick(r, ["detalle","data","descripcion","descripción","cambios","payload"], ""));
+      const fecha = r.fecha || '';
+      const usuario = r.usuario || '-';
+      const ip = r.ip || '-';
+      const accion = r.accion || '';
+      const tabla = r.tabla || '-';
+      const detalle = (r.detalle || r.descripcion || '');
+      
+      let estadoClass = "status-inactive";
+      if (accion.includes('ok') || accion.includes('create') || accion.includes('update')) estadoClass = "status-active";
+      if (accion.includes('fail') || accion.includes('delete') || accion.includes('anular')) estadoClass = "status-warning";
+      
       return `
         <tr>
           <td>${escapeHtml(fecha)}</td>
-          <td>${escapeHtml(usuario)}</td>
-          <td><strong>${escapeHtml(accion)}</strong></td>
+          <td><strong>${escapeHtml(usuario)}</strong></td>
+          <td>${escapeHtml(ip)}</td>
+          <td><span class="status-badge ${estadoClass}">${escapeHtml(accion)}</span></td>
           <td>${escapeHtml(tabla)}</td>
           <td style="max-width:420px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(detalle)}">
-            ${escapeHtml(detalle)}
+            ${escapeHtml(detalle.substring(0, 100))}${detalle.length > 100 ? '...' : ''}
           </td>
         </tr>
       `;
@@ -2653,9 +2815,8 @@ async function viewAuditoria(me) {
   }
 
   async function load() {
-    // Si tu backend no tiene este endpoint, verás el mensaje de error aquí.
     if (!Api.auditoria_list) {
-      setMsg("no existe Api.auditoria_list en el frontend. agrega el endpoint en tu api.php.", false);
+      setMsg("endpoint no disponible", false);
       $("#aBody").innerHTML = `<tr><td colspan="6" class="td-center td-error">endpoint no disponible</td></tr>`;
       return;
     }
@@ -2667,19 +2828,32 @@ async function viewAuditoria(me) {
       return;
     }
 
-    data = (r.rows || r.data || []);
-    if (!Array.isArray(data)) data = [];
+    allLogs = (r.rows || r.data || []);
+    if (!Array.isArray(allLogs)) allLogs = [];
     page = 1;
     render();
   }
 
   if ($("#aSearch")) {
-    $("#aSearch").addEventListener("input", () => { page = 1; render(); });
+    $("#aSearch").addEventListener("input", () => { 
+      page = 1; 
+      render(); 
+    });
+  }
+
+  // BOTÓN PDF
+  if ($("#btnPdfAuditoria")) {
+    $("#btnPdfAuditoria").onclick = () => {
+      if (filteredLogs.length === 0) {
+        setMsg("no hay datos para generar PDF", false);
+        return;
+      }
+      generarPDFAuditoria();
+    };
   }
 
   await load();
 }
-
 /* =========================
    MI PERFIL (ESTUDIANTE)
    ========================= */

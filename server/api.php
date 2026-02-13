@@ -58,7 +58,7 @@ function is_duplicate_error($err){
 }
 
 /* =====================
-   AUTH helpers (cuentas)
+   AUTH helpers
    ===================== */
 
 function load_me() {
@@ -161,7 +161,6 @@ if ($action === "login") {
   $password = (string)($body["password"] ?? "");
   if ($usuario === "" || $password === "") fail("datos incompletos");
 
-  // 1) buscar cuenta
   $st = mysqli_prepare($enlace, "SELECT id, usuario, password_hash, tipo, activo FROM cuentas WHERE usuario=? LIMIT 1");
   if (!$st) fail("error interno", 500);
   mysqli_stmt_bind_param($st, "s", $usuario);
@@ -179,13 +178,11 @@ if ($action === "login") {
   $tipo = (string)$acc["tipo"];
   if ($tipo !== "SISTEMA" && $tipo !== "ESTUDIANTE") fail("tipo de cuenta inválido", 500);
 
-  // 2) validar password (en cuentas)
   if (!password_verify($password, (string)$acc["password_hash"])) {
     audit("login_fail", "cuentas", (int)$acc["id"], "password incorrecta");
     fail("usuario o contraseña incorrectos", 401);
   }
 
-  // 3) cargar perfil según tipo
   session_regenerate_id(true);
   $_SESSION["cuenta_id"] = (int)$acc["id"];
   $_SESSION["usuario"] = (string)$acc["usuario"];
@@ -258,7 +255,7 @@ if ($action === "logout") {
 
 require_login();
 
-/* ===================== USUARIOS (SISTEMA) ===================== */
+/* ===================== USUARIOS  ===================== */
 
 if ($action === "usuarios_list") {
   require_perm("usuarios", "ver");
@@ -307,7 +304,6 @@ if ($action === "usuarios_create") {
 
   mysqli_begin_transaction($enlace);
 
-  // cuentas
   $stAcc = mysqli_prepare($enlace, "INSERT INTO cuentas(usuario,password_hash,tipo,activo) VALUES(?,?,'SISTEMA',1)");
   if (!$stAcc) { mysqli_rollback($enlace); fail("error interno",500); }
   mysqli_stmt_bind_param($stAcc, "ss", $usuario, $hash);
@@ -322,7 +318,6 @@ if ($action === "usuarios_create") {
     fail("error al crear cuenta", 500);
   }
 
-  // usuarios (duplicamos hash para no romper esquema actual)
   if ($rol_id === null) {
     $st = mysqli_prepare($enlace, "
       INSERT INTO usuarios (cuenta_id,usuario,nombres,apellidos,cedula,fecha_nacimiento,password_hash,activo,intentos_fallidos)
@@ -555,7 +550,6 @@ if ($action === "estudiantes_create") {
     $cuenta_id = null;
     
     if ($crear_cuenta) {
-        // Usuario = cédula, password = cédula
         $usuario = $cedula;
         $hash = password_hash($cedula, PASSWORD_BCRYPT);
         
@@ -828,8 +822,7 @@ if ($action === "permisos_set") {
 }
 
 /* =========================
-   cursos (ONLINE)
-   campos permitidos: nombre, descripcion, duracion_semanas, costo, dia_semana, hora_inicio, hora_fin, docente_id
+   cursos
    ========================= */
 
 if ($action === "cursos_list") {
@@ -996,9 +989,7 @@ if ($action === "cursos_delete") {
 }
 
 /* =========================
-   matriculas (ESTUDIANTE)
-   - estudiante se matricula/anula a sí mismo
-   - listado del horario (parte de abajo)
+   matriculas 
    ========================= */
 
 function require_student_session(){
@@ -1017,7 +1008,6 @@ if ($action === "matriculas_create") {
   $estudiante_id = (int)($_SESSION["estudiante_id"] ?? 0);
   if ($estudiante_id<=0) fail("estudiante inválido", 401);
 
-  // obtener datos del curso (día/hora) para choque
   $st = mysqli_prepare($enlace, "
     SELECT dia_semana,
            TIME_FORMAT(hora_inicio,'%H:%i') hi,
@@ -1059,7 +1049,6 @@ if ($action === "matriculas_create") {
   mysqli_stmt_close($st);
   if ($conf) fail("choque de horario con otro curso (mismo día y traslape)", 409);
 
-  // insertar / reactivar
   $st = mysqli_prepare($enlace, "
     INSERT INTO matriculas(curso_id,estudiante_id,estado)
     VALUES(?,?,'ACTIVA')
@@ -1107,7 +1096,6 @@ if ($action === "matriculas_list_estudiante") {
   require_active_user();
   global $enlace;
 
-  // estudiante: solo su propio horario. sistema: requiere permiso (opcional)
   $tipo = (string)($_SESSION["tipo"] ?? "");
   if ($tipo === "ESTUDIANTE") {
     $estudiante_id = (int)($_SESSION["estudiante_id"] ?? 0);
@@ -1144,7 +1132,7 @@ if ($action === "matriculas_list_estudiante") {
 }
 
 /* =========================
-   notas (docente / admin)
+   notas
    ========================= */
 
 if ($action === "mis_cursos") {
@@ -1204,7 +1192,6 @@ if ($action === "curso_estudiantes") {
   $curso_id = (int)($_GET["curso_id"] ?? 0);
   if ($curso_id<=0) fail("curso_id inválido");
 
-  // docente solo puede ver estudiantes de sus cursos (admin puede todo)
   if (!is_admin()) {
     $docente_id = (int)($_SESSION["usuario_id"] ?? 0);
     $st = mysqli_prepare($enlace, "SELECT id FROM cursos WHERE id=? AND docente_id=? AND activo=1 LIMIT 1");
@@ -1259,7 +1246,7 @@ if ($action === "guardar_notas") {
 
   $actualizado_por = (int)($_SESSION["usuario_id"] ?? 0);
   
-  // Verificar permiso
+
   if (!is_admin()) {
     $st = mysqli_prepare($enlace, "SELECT id FROM cursos WHERE id=? AND docente_id=? AND activo=1 LIMIT 1");
     if (!$st) fail("error interno",500);
@@ -1277,48 +1264,40 @@ if ($action === "guardar_notas") {
     $eid = (int)($it["estudiante_id"] ?? 0);
     if ($eid<=0) { mysqli_rollback($enlace); fail("estudiante inválido"); }
 
-    // Obtener notas
+
     $p1 = (float)($it["p1_total"] ?? 0);
     $p2 = (float)($it["p2_total"] ?? 0);
     $p3 = (float)($it["p3_total"] ?? 0);
     $sup = $it["supletorio_nota"] ?? null;
     if ($sup === "" || $sup === "null") $sup = null;
     
-    // Calcular promedio
     $promedio = round(($p1 + $p2 + $p3) / 3, 2);
     
-    // ===== LÓGICA DE NOTAS CORREGIDA =====
     $nota_final = $promedio;
     $estado = "REPROBADO";
     
     if ($promedio >= 14) {
-        // APRUEBA DIRECTAMENTE
         $nota_final = $promedio;
         $estado = "APROBADO";
         $sup = null;
     } 
     elseif ($promedio >= 10 && $promedio < 14) {
-        // VA A SUPLETORIO
         if ($sup !== null) {
-            // YA TIENE NOTA DE SUPLETORIO
-            $nota_final = $promedio; // ✅ LA NOTA FINAL ES EL PROMEDIO
+            $nota_final = $promedio; 
             $estado = ($sup >= 14) ? "APROBADO" : "REPROBADO";
-            // CONSERVAMOS $sup PARA GUARDARLO
+
         } else {
-            // ESPERANDO SUPLETORIO
             $nota_final = $promedio;
             $estado = "SUPLETORIO";
             $sup = null;
         }
     } 
     else {
-        // REPROBADO DIRECTO
         $nota_final = $promedio;
         $estado = "REPROBADO";
         $sup = null;
     }
 
-    // Verificar si ya existe el registro
     $check = mysqli_prepare($enlace, "SELECT id FROM notas WHERE curso_id=? AND estudiante_id=?");
     mysqli_stmt_bind_param($check, "ii", $curso_id, $eid);
     mysqli_stmt_execute($check);
@@ -1326,7 +1305,6 @@ if ($action === "guardar_notas") {
     mysqli_stmt_close($check);
 
     if ($exists) {
-      // UPDATE
       $sql = "UPDATE notas SET 
               p1_total = ?, p2_total = ?, p3_total = ?,
               supletorio_nota = ?, nota_final = ?, estado = ?, actualizado_por = ?
@@ -1335,7 +1313,7 @@ if ($action === "guardar_notas") {
       mysqli_stmt_bind_param($stmt, "dddddsiii", 
         $p1, $p2, $p3, $sup, $nota_final, $estado, $actualizado_por, $curso_id, $eid);
     } else {
-      // INSERT
+
       $sql = "INSERT INTO notas 
               (curso_id, estudiante_id, p1_total, p2_total, p3_total, supletorio_nota, nota_final, estado, actualizado_por) 
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
@@ -1358,9 +1336,6 @@ if ($action === "guardar_notas") {
   ok();
 }
 
-/* =========================
-   reportes (JSON)
-   ========================= */
 /* =========================
    REPORTES 
    ========================= */
@@ -1499,8 +1474,7 @@ if ($action === "reporte_notas_curso_docente") {
   ok(["rows"=>$rows]);
 }
 /* =========================
-   MI PERFIL (ESTUDIANTE)
-   SOLO EDITABLE: correo, telefono, fecha_nacimiento, usuario, password
+   MI PERFIL 
    ========================= */
 
 if ($action === "mi_perfil") {
@@ -1559,7 +1533,6 @@ if ($action === "mi_perfil_actualizar") {
   $usuario = trim(strtolower((string)($body["usuario"] ?? "")));
   $password = (string)($body["password"] ?? "");
 
-  // Validar fecha de nacimiento (mayor de 18)
   if ($fecha_nacimiento === "") {
     fail("fecha de nacimiento es obligatoria", 400);
   }
@@ -1570,7 +1543,6 @@ if ($action === "mi_perfil_actualizar") {
 
   mysqli_begin_transaction($enlace);
 
-  // 1. Actualizar SOLO fecha_nacimiento, correo, telefono del estudiante
   $sql = "UPDATE estudiantes 
           SET fecha_nacimiento = ?, 
               correo = ?, 
@@ -1586,7 +1558,6 @@ if ($action === "mi_perfil_actualizar") {
   }
   mysqli_stmt_close($st);
 
-  // 2. Obtener cuenta_id
   $st = mysqli_prepare($enlace, "SELECT cuenta_id FROM estudiantes WHERE id = ?");
   mysqli_stmt_bind_param($st, "i", $estudiante_id);
   mysqli_stmt_execute($st);
@@ -1600,7 +1571,6 @@ if ($action === "mi_perfil_actualizar") {
     fail("cuenta de usuario no encontrada", 404);
   }
 
-  // 3. Actualizar usuario SOLO si se proporcionó y es válido
   if ($usuario !== "") {
     if (strlen($usuario) < 4) {
       mysqli_rollback($enlace);
@@ -1621,7 +1591,6 @@ if ($action === "mi_perfil_actualizar") {
     $_SESSION["usuario"] = $usuario;
   }
 
-  // 4. Actualizar contraseña SOLO si se proporcionó
   if ($password !== "") {
     if (strlen($password) < 8) {
       mysqli_rollback($enlace);
@@ -1702,7 +1671,6 @@ if ($action === "auditoria_list") {
   }
   mysqli_stmt_close($st);
 
-  // contar total para paginación
   $sqlCount = "SELECT COUNT(*) as total FROM auditoria WHERE 1=1";
   $paramsCount = [];
   $typesCount = "";

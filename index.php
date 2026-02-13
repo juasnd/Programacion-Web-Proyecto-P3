@@ -17,6 +17,8 @@ if (isset($_GET["api"]) && $_GET["api"] === "1") {
 
 <script src="./js/api.js?v=<?=time()?>"></script>
 <script src="./js/app.js?v=<?=time()?>"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
 
 
 </body>
